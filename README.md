@@ -11,6 +11,10 @@ reorder, share a `tasks.json` with your team. ~5 MB binary, real PTY,
 sandbox‑free.
 
 <p align="center">
+  <img src="docs/demo.gif" width="780" alt="Heart demo">
+</p>
+
+<p align="center">
   <img src="docs/screenshot.png" width="780" alt="Heart screenshot">
 </p>
 
