@@ -1,0 +1,63 @@
+[
+  {
+    "autoStart": false,
+    "command": "uv run src/agent.py dev",
+    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_backend/livekit-voice-agent",
+    "id": "livekit-agent",
+    "name": "LiveKit Voice Agent"
+  },
+  {
+    "autoStart": false,
+    "command": "php artisan reverb:start",
+    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_backend",
+    "id": "reverb",
+    "name": "Laravel Reverb (8082)",
+    "port": 8082
+  },
+  {
+    "autoStart": false,
+    "command": "php artisan serve",
+    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_backend",
+    "id": "laravel-serve",
+    "name": "Laravel Serve (8000)",
+    "port": 8000
+  },
+  {
+    "autoStart": false,
+    "command": "php artisan horizon",
+    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_backend",
+    "id": "horizon",
+    "name": "Laravel Horizon"
+  },
+  {
+    "autoStart": false,
+    "command": "ngrok-share",
+    "cwd": "/Users/kerembekman/www/blockgain/maatrics",
+    "id": "ngrok",
+    "name": "ngrok Share"
+  },
+  {
+    "autoStart": false,
+    "command": "npm run dev",
+    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_frontend",
+    "folder": "Frontend",
+    "id": "maatrics-frontend",
+    "name": "Maatrics Frontend"
+  },
+  {
+    "autoStart": false,
+    "command": "npm run dev",
+    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_meet_frontend",
+    "folder": "Frontend",
+    "id": "maatrics-meet-frontend",
+    "name": "Maatrics Meet Frontend"
+  },
+  {
+    "autoStart": false,
+    "command": "npm run dev",
+    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_panel_frontend",
+    "folder": "Frontend",
+    "id": "maatrics-panel-frontend",
+    "name": "Maatrics Panel Frontend"
+  }
+]
