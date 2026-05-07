@@ -1,60 +1,56 @@
 # Heart
 
-> Tek pencereden tüm local dev process'lerini başlat, durdur, restart et — ngrok'tan
-> Laravel'e, npm dev'inden voice agent'a kadar her şey bir arada.
+> A native macOS launcher for all your local dev processes — start, stop, and
+> restart them from a single window. From `ngrok` to `npm run dev` to a Laravel
+> queue worker, everything in one place.
 
-**Heart**, geliştirici makinende günde 10 kez çalıştırdığın komutları tek bir pencereden
-yöneten native macOS uygulamasıdır. SwiftUI · ~5 MB binary · gerçek PTY ·
-sandbox-free.
+**Heart** is a SwiftUI app for the commands you run ten times a day on your
+dev machine. It replaces the tabs‑in‑Terminal / `tmux` / `screen` shuffle
+with a single window: green dot means running, click to stop, drag to
+reorder, share a `tasks.json` with your team. ~5 MB binary, real PTY,
+sandbox‑free.
 
 <p align="center">
   <img src="docs/screenshot.png" width="780" alt="Heart screenshot">
 </p>
 
-## Neden?
+## Features
 
-`tmux` / `screen` / 10 farklı Terminal sekmesi yerine: bir uygulama açarsın, hangi
-servisin çalıştığını yeşil noktadan görürsün, durdurmak için butona basarsın.
-Ekibinle bir `tasks.json` paylaşırsın, herkes aynı stack'i tek tıkla ayağa kaldırır.
-
-## Özellikler
-
-- **Start / Stop / Restart** her task için tek tıkla
-- **Klasör yapısı** — task'ları gruplayabilir, klasör başlığından toplu start/stop yapabilirsin (iç içe klasörler de destekleniyor)
-- **Sürükle-bırak import** — `tasks.json` dosyasını sidebar'a bırak → klasör olarak ekle
-- **Sağ-tık → Düzenle** — port, klasör, komut, cwd hepsini arayüzden değiştir, JSON otomatik senkronlanır
-- **Real PTY** — `script(1)` ile gerçek terminal allocate, `ngrok` / `htop` / `top` düzgün render olur
-- **Interactive terminal** — output panel'ına klavyeden yaz, Ctrl+C / Ctrl+D / ok tuşları PTY'ye iletilir
-- **Port readiness** — `port` set'liyse server gerçekten bind olana kadar sarı spinner; sonra yeşil
-- **KILL PORT** butonu — port set'liyse `lsof -ti tcp:<port> | xargs kill -9`
-- **JSON Settings** — tüm config raw JSON, Import / Export / Reset
-- **Login shell** — komutlar `/bin/zsh -l -i -c` ile spawn edilir; `~/.zshrc` PATH ve alias'ları doğal yüklenir
-- **Graceful shutdown** — SIGINT → 3sn SIGTERM → 3sn SIGKILL escalation; Cmd+Q tüm child process'leri temizler
+- **Start / Stop / Restart** — one tap per task
+- **Nested folders** — group tasks, run start/stop on the entire group
+- **Drag‑and‑drop import** — drop a `tasks.json` onto the sidebar to add it as a folder
+- **Right‑click → Edit** — change port, folder, command, cwd from the UI; the JSON file stays in sync
+- **Real PTY** — `script(1)` allocates a TTY, so `ngrok`, `htop`, `top` render correctly
+- **Interactive terminal** — type into the output panel; Ctrl+C / Ctrl+D / arrow keys forward to the PTY
+- **Port readiness check** — yellow spinner until your service actually binds, then green
+- **KILL PORT** button — `lsof -ti tcp:<port> | xargs kill -9`, scoped to the task's port
+- **Login shell** — commands run under `/bin/zsh -l -i -c`, so your `~/.zshrc` PATH and aliases work
+- **Graceful shutdown** — SIGINT → 3 s SIGTERM → 3 s SIGKILL; ⌘Q cleans up every child
 
 ---
 
-## Kurulum
+## Install
 
-### Hazır build'le (önerilen)
+### From a release build (recommended)
 
-[**Latest Release →**](https://github.com/ocracy/heart/releases/latest) sayfasından
-`Heart.zip`'i indir, sonra:
+Grab the latest [**Heart.zip**](https://github.com/ocracy/heart/releases/latest), then:
 
-1. Zip'i aç → `Heart.app`'ı **`/Applications`**'a sürükle.
-2. Terminal'e şunu yapıştır + Enter (karantine flag'ini kaldırır):
+1. Unzip → drag `Heart.app` into **`/Applications`**.
+2. Open Terminal and run (clears the quarantine flag and launches the app):
    ```bash
    xattr -cr /Applications/Heart.app && open /Applications/Heart.app
    ```
-3. Açıldı. Sonraki açılışlarda Spotlight (`⌘+Space`) → "heart" → Enter.
+3. Launch from Spotlight (`⌘+Space` → "heart") on subsequent runs.
 
-> **Neden 2. adım?** Heart ad-hoc imzalı (Apple Developer Program üyeliği gerektirmiyor).
-> `xattr` sadece `com.apple.quarantine` flag'ini siler — güvenli, tek seferlik.
+> **Why step 2?** Heart is ad‑hoc signed (no paid Apple Developer account
+> behind it). The `xattr` command only clears `com.apple.quarantine` —
+> safe and one‑time only.
 
-**Terminal'e girmek istemezsen alternatif:**
-- Finder → `/Applications/Heart.app` → sağ-tık → **Open** → diyalogda **Open**
-- Ya da System Settings → Privacy & Security → en alt → "Heart was blocked..." → **Open Anyway**
+**Don't want to use Terminal?**
+- Finder → right‑click `/Applications/Heart.app` → **Open** → click **Open** in the dialog.
+- Or System Settings → Privacy & Security → scroll down → "Heart was blocked..." → **Open Anyway**.
 
-### Kaynak koddan build
+### From source
 
 ```bash
 git clone https://github.com/ocracy/heart.git
@@ -62,67 +58,71 @@ cd heart
 ./install.sh
 ```
 
-`/Applications/Heart.app`'a kurar. Gereksinimler: macOS 13+, Xcode Command Line Tools (Swift 5.9+).
+Installs to `/Applications/Heart.app`. Requires macOS 13+ and Xcode Command
+Line Tools (Swift 5.9+).
 
 ---
 
-## İlk açılış
+## First run
 
-İlk çalıştırmada 2 jenerik örnek task (HTTP server, log tail) gelir. Kendi
-config'ini eklemenin 3 yolu:
+A fresh install ships with two generic placeholder tasks. Three ways to add
+your own:
 
-**A. Sidebar'a sürükle-bırak** — bir `tasks.json` dosyasını sidebar'ın altındaki
-"drop zone"a bırak → klasör adı sor → ekle.
+**A. Drag‑and‑drop** — drop a `tasks.json` onto the dashed area at the bottom
+of the sidebar. You'll be asked to name a folder, and every task without
+its own `folder` field lands inside it. Tasks that already declare a folder
+are nested under it (e.g. dropping with name `Maatrics`, a task with
+`"folder": "Frontend"` ends up at `Maatrics/Frontend`).
 
-**B. Sağ-tık → Düzenle** — sidebar'da var olan bir task'a sağ-tık → Düzenle →
-form ile değiştir, kaydet.
+**B. Right‑click → Edit** — modify any existing task in a clean form.
+Every save writes to disk immediately.
 
-**C. Settings → JSON editor** (`⌘+,`) — raw JSON'u manuel yaz/yapıştır → Save & Close.
+**C. Settings → JSON editor** (`⌘+,`) — paste raw JSON, validate, save.
 
-Repo'da `tasks.example.json` var — Laravel + LiveKit + ngrok + 3 frontend dev-server
-kurulumu için hazır config. Ekibine bu JSON'u paylaşıp herkes Heart'a Import edebilir.
+A starter [`tasks.example.json`](tasks.example.json) is in the repo. Drop
+it on the sidebar to see folder grouping, ports, and ngrok in one go.
 
 ---
 
-## tasks.json formatı
+## tasks.json schema
 
 ```json
 [
   {
-    "id": "laravel-serve",
-    "name": "Laravel Serve (8000)",
-    "command": "php artisan serve",
-    "cwd": "/path/to/your/project",
-    "port": 8000,
-    "folder": "Backend",
+    "id": "web-dev",
+    "name": "Web dev server",
+    "command": "npm run dev",
+    "cwd": "~/projects/web",
+    "port": 3000,
+    "folder": "Frontend",
     "autoStart": false
   }
 ]
 ```
 
-| Alan | Tip | Açıklama |
-|---|---|---|
-| `id` | string | Unique key (slug ya da UUID) |
-| `name` | string | Sidebar'da görünen isim |
-| `command` | string | `/bin/zsh -l -i -c` ile çalıştırılır |
-| `cwd` | string | Mutlak path |
-| `port` | int? | Set'liyse: readiness check + KILL PORT butonu |
-| `folder` | string? | Sidebar'da gruplama. `/` ile alt klasör (`"Maatrics/Frontend"`) |
-| `autoStart` | bool? | (rezerv — UI henüz uygulamıyor) |
+| Field       | Type      | Notes                                                              |
+|-------------|-----------|--------------------------------------------------------------------|
+| `id`        | string    | Unique key (slug or UUID)                                          |
+| `name`      | string    | Sidebar label                                                      |
+| `command`   | string    | Runs under `/bin/zsh -l -i -c`                                     |
+| `cwd`       | string    | Absolute path or `~/...` (tilde is expanded)                       |
+| `port`      | int?      | If set: enables readiness check + KILL PORT button                 |
+| `folder`    | string?   | Sidebar grouping. Use `/` for nesting — e.g. `Backend/Workers`     |
+| `autoStart` | bool?     | Reserved — saved but not yet acted on by the UI                    |
 
-Config dosyası: `~/Library/Application Support/Heart/tasks.json`
+Config file: `~/Library/Application Support/Heart/tasks.json`
 
 ---
 
-## Komutlar
+## Scripts
 
 ```bash
-./build.sh     # release build, ./Heart.app oluşturur (kurmaz)
-./install.sh   # build + /Applications/Heart.app'a kur
-./dist.sh      # universal binary (arm64 + x86_64), ad-hoc imza, Heart.zip paketler
+./build.sh     # release build, produces ./Heart.app (no install)
+./install.sh   # build + install to /Applications/Heart.app
+./dist.sh      # universal (arm64 + x86_64), ad-hoc signed, packaged as Heart.zip
 ```
 
-Sadece icon'u yenilemek için:
+To regenerate just the icon:
 ```bash
 swift scripts/make-icon.swift && iconutil -c icns AppIcon.iconset -o AppIcon.icns
 ```
@@ -141,13 +141,13 @@ rm -rf ~/Library/Application\ Support/Heart
 ## Tech stack
 
 - Swift 5.9+ + SwiftUI (macOS 13+)
-- `/usr/bin/script` ile PTY allocate
-- Foundation `Process` + `Pipe` ile child process yönetimi
-- Swift Package Manager (Xcode projesi yok — `./build.sh` `.app` bundle üretir)
-- ~5 MB binary, sandbox kapalı (child process spawn için zorunlu)
+- `/usr/bin/script` for PTY allocation
+- Foundation `Process` + `Pipe` for child‑process management
+- Swift Package Manager (no Xcode project — `./build.sh` produces the `.app` bundle)
+- ~5 MB binary, sandbox disabled (required for spawning child processes)
 
 ---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

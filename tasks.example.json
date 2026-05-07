@@ -1,63 +1,61 @@
 [
   {
     "autoStart": false,
-    "command": "uv run src/agent.py dev",
-    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_backend/livekit-voice-agent",
-    "id": "livekit-agent",
-    "name": "LiveKit Voice Agent"
-  },
-  {
-    "autoStart": false,
-    "command": "php artisan reverb:start",
-    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_backend",
-    "id": "reverb",
-    "name": "Laravel Reverb (8082)",
-    "port": 8082
-  },
-  {
-    "autoStart": false,
-    "command": "php artisan serve",
-    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_backend",
-    "id": "laravel-serve",
-    "name": "Laravel Serve (8000)",
+    "command": "python3 -m http.server 8000",
+    "cwd": "~/Sites",
+    "id": "static-site",
+    "name": "Static site (8000)",
     "port": 8000
   },
   {
     "autoStart": false,
-    "command": "php artisan horizon",
-    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_backend",
-    "id": "horizon",
-    "name": "Laravel Horizon"
+    "command": "tail -f /var/log/system.log",
+    "cwd": "~",
+    "id": "system-logs",
+    "name": "System logs"
   },
   {
     "autoStart": false,
-    "command": "ngrok-share",
-    "cwd": "/Users/kerembekman/www/blockgain/maatrics",
+    "command": "ngrok http 3000",
+    "cwd": "~",
+    "folder": "Tools",
     "id": "ngrok",
-    "name": "ngrok Share"
+    "name": "ngrok tunnel"
   },
   {
     "autoStart": false,
     "command": "npm run dev",
-    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_frontend",
+    "cwd": "~/projects/web",
     "folder": "Frontend",
-    "id": "maatrics-frontend",
-    "name": "Maatrics Frontend"
+    "id": "web-dev",
+    "name": "Web dev server",
+    "port": 3000
   },
   {
     "autoStart": false,
     "command": "npm run dev",
-    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_meet_frontend",
+    "cwd": "~/projects/admin",
     "folder": "Frontend",
-    "id": "maatrics-meet-frontend",
-    "name": "Maatrics Meet Frontend"
+    "id": "admin-dev",
+    "name": "Admin dev server",
+    "port": 3001
   },
   {
     "autoStart": false,
-    "command": "npm run dev",
-    "cwd": "/Users/kerembekman/www/blockgain/maatrics/maatrics_panel_frontend",
-    "folder": "Frontend",
-    "id": "maatrics-panel-frontend",
-    "name": "Maatrics Panel Frontend"
+    "command": "npm run start",
+    "cwd": "~/projects/api",
+    "folder": "Backend",
+    "id": "api-server",
+    "name": "API server",
+    "port": 4000
+  },
+  {
+    "autoStart": false,
+    "command": "redis-server",
+    "cwd": "~",
+    "folder": "Backend",
+    "id": "redis",
+    "name": "Redis",
+    "port": 6379
   }
 ]

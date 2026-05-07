@@ -44,7 +44,10 @@ final class ProcessManager: ObservableObject {
         // Without -i, GUI-launched apps miss user PATH additions like
         // `export PATH=$HOME/bin:$PATH` typically placed in ~/.zshrc.
         process.arguments = ["-q", "/dev/null", "/bin/zsh", "-l", "-i", "-c", wrapped]
-        process.currentDirectoryURL = URL(fileURLWithPath: task.cwd)
+        // `cwd` may contain a leading "~" (saved from the JSON or edit dialog) — expand it
+        // so Foundation chdir's correctly, since it doesn't perform shell tilde expansion.
+        let expandedCwd = (task.cwd as NSString).expandingTildeInPath
+        process.currentDirectoryURL = URL(fileURLWithPath: expandedCwd)
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

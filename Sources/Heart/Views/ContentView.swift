@@ -113,7 +113,7 @@ struct ContentView: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.json]
-        panel.message = "Klasör olarak içe aktarılacak tasks.json dosyasını seçin"
+        panel.message = "Select a tasks.json file to import as a folder"
         if panel.runModal() == .OK, let url = panel.url {
             presentImport(for: url)
         }
@@ -183,13 +183,13 @@ struct ContentView: View {
             }
 
             HStack(spacing: 6) {
-                folderIconButton(systemName: "play.fill", tint: .green, help: "Klasördeki tüm görevleri başlat") {
+                folderIconButton(systemName: "play.fill", tint: .green, help: "Start all tasks in folder") {
                     processManager.startAll(allTasks)
                 }
-                folderIconButton(systemName: "stop.fill", tint: .red, help: "Klasördeki tüm görevleri durdur") {
+                folderIconButton(systemName: "stop.fill", tint: .red, help: "Stop all tasks in folder") {
                     processManager.stopAll(allTasks)
                 }
-                folderIconButton(systemName: "arrow.clockwise", tint: .secondary, help: "Klasördeki tüm görevleri yeniden başlat") {
+                folderIconButton(systemName: "arrow.clockwise", tint: .secondary, help: "Restart all tasks in folder") {
                     for task in allTasks { processManager.restart(task) }
                 }
             }
@@ -201,19 +201,19 @@ struct ContentView: View {
         .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
         .contextMenu {
             Button { processManager.startAll(allTasks) } label: {
-                Label("Tümünü başlat", systemImage: "play.fill")
+                Label("Start all", systemImage: "play.fill")
             }
             Button { processManager.stopAll(allTasks) } label: {
-                Label("Tümünü durdur", systemImage: "stop.fill")
+                Label("Stop all", systemImage: "stop.fill")
             }
             Button { for task in allTasks { processManager.restart(task) } } label: {
-                Label("Tümünü yeniden başlat", systemImage: "arrow.clockwise")
+                Label("Restart all", systemImage: "arrow.clockwise")
             }
             Divider()
             Button(role: .destructive) {
                 deleteFolder(path: node.path)
             } label: {
-                Label("Klasörü sil (\(totalCount) görev)", systemImage: "trash")
+                Label("Delete folder (\(totalCount) tasks)", systemImage: "trash")
             }
         }
     }
@@ -247,25 +247,25 @@ struct ContentView: View {
         Button {
             processManager.toggle(task)
         } label: {
-            Label(isRunning ? "Durdur" : "Başlat",
+            Label(isRunning ? "Stop" : "Start",
                   systemImage: isRunning ? "stop.fill" : "play.fill")
         }
         Button {
             processManager.restart(task)
         } label: {
-            Label("Yeniden başlat", systemImage: "arrow.clockwise")
+            Label("Restart", systemImage: "arrow.clockwise")
         }
         Divider()
         Button {
             editingTask = task
         } label: {
-            Label("Düzenle…", systemImage: "pencil")
+            Label("Edit…", systemImage: "pencil")
         }
         Divider()
         Button(role: .destructive) {
             deleteTask(task)
         } label: {
-            Label("Sil", systemImage: "trash")
+            Label("Delete", systemImage: "trash")
         }
     }
 
@@ -421,74 +421,202 @@ struct EditTaskSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Image(systemName: "pencil.circle.fill")
-                    .font(.system(size: 22))
-                    .foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Görevi düzenle")
-                        .font(.title3.bold())
-                    Text(verbatim: "id: \(task.id)")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-
-            Form {
-                LabeledContent("İsim") {
-                    TextField("Görev adı", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                }
-                LabeledContent("Komut") {
-                    TextField("npm run dev, php artisan serve, …", text: $command)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                }
-                LabeledContent("Çalışma dizini") {
-                    HStack(spacing: 6) {
-                        TextField("/Users/…", text: $cwd)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .monospaced))
-                        Button("Seç…") { pickDirectory() }
-                    }
-                }
-                LabeledContent("Port (opsiyonel)") {
-                    TextField("Örn. 3000", text: $portText)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 120)
-                        .onChange(of: portText) { new in
-                            let filtered = new.filter(\.isNumber)
-                            if filtered != new { portText = filtered }
-                        }
-                }
-                LabeledContent("Klasör") {
-                    TextField("Örn. Maatrics/Frontend", text: $folder)
-                        .textFieldStyle(.roundedBorder)
-                        .help("Boş bırakırsan kök listeye düşer. `/` ile alt klasör yapabilirsin.")
-                }
-                LabeledContent("Auto-start") {
-                    Toggle("", isOn: $autoStart)
-                        .labelsHidden()
-                }
-            }
-            .formStyle(.grouped)
+        VStack(spacing: 0) {
+            header
 
             Divider()
 
-            HStack {
-                Spacer()
-                Button("İptal", role: .cancel) { onCancel() }
-                    .keyboardShortcut(.cancelAction)
-                Button("Kaydet") { commit() }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!isValid)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    field(label: "Name") {
+                        styledTextField(placeholder: "My dev server", text: $name)
+                    }
+
+                    field(label: "Command") {
+                        styledTextField(
+                            placeholder: "npm run dev",
+                            text: $command,
+                            monospaced: true
+                        )
+                    }
+
+                    field(label: "Working directory",
+                          hint: "Where the command runs. Tilde (~) expands to your home folder.") {
+                        directoryRow
+                    }
+
+                    HStack(alignment: .top, spacing: 16) {
+                        field(label: "Port",
+                              hint: "Optional. Enables the KILL PORT button and readiness check.") {
+                            styledTextField(placeholder: "3000", text: $portText, monospaced: true)
+                                .frame(width: 140)
+                                .onChange(of: portText) { new in
+                                    let filtered = new.filter(\.isNumber)
+                                    if filtered != new { portText = filtered }
+                                }
+                        }
+
+                        field(label: "Folder",
+                              hint: "Optional. Use “/” for nested folders, e.g. Backend/Workers.") {
+                            styledTextField(placeholder: "Backend", text: $folder)
+                        }
+                    }
+
+                    Toggle(isOn: $autoStart) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Auto-start on launch")
+                                .font(.system(size: 13, weight: .medium))
+                            Text("Reserved — the UI flag is saved but not yet acted upon.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 22)
+            }
+
+            Divider()
+
+            footer
+        }
+        .frame(width: 560, height: 620)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    // MARK: - sections
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.accentColor.opacity(0.15))
+                Image(systemName: "pencil")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .frame(width: 36, height: 36)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Edit task")
+                    .font(.system(size: 16, weight: .semibold))
+                Text(verbatim: "id: \(task.id)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+    }
+
+    private var directoryRow: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.accentColor)
+                if cwd.isEmpty {
+                    Text("Choose a directory…")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(displayPath(cwd))
+                        .font(.system(size: 12, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(cwd)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color(NSColor.textBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5)
+            )
+
+            Button {
+                pickDirectory()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "folder.badge.plus")
+                    Text("Browse")
+                }
+                .font(.system(size: 12, weight: .medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Spacer()
+            Button("Cancel", role: .cancel) { onCancel() }
+                .keyboardShortcut(.cancelAction)
+            Button("Save changes") { commit() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!isValid)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
+        .background(Color(NSColor.underPageBackgroundColor))
+    }
+
+    // MARK: - helpers
+
+    @ViewBuilder
+    private func field<Content: View>(label: String,
+                                      hint: String? = nil,
+                                      @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label.uppercased())
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .tracking(0.6)
+            content()
+            if let hint {
+                Text(hint)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(20)
-        .frame(width: 560)
+    }
+
+    @ViewBuilder
+    private func styledTextField(placeholder: String,
+                                 text: Binding<String>,
+                                 monospaced: Bool = false) -> some View {
+        TextField(placeholder, text: text)
+            .textFieldStyle(.plain)
+            .font(monospaced ? .system(size: 12, design: .monospaced) : .system(size: 13))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color(NSColor.textBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5)
+            )
+    }
+
+    private func displayPath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path == home { return "~" }
+        if path.hasPrefix(home + "/") {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
     }
 
     private var isValid: Bool {
@@ -518,7 +646,11 @@ struct EditTaskSheet: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: cwd.isEmpty ? NSHomeDirectory() : cwd)
+        panel.prompt = "Choose"
+        let initial = cwd.isEmpty
+            ? NSHomeDirectory()
+            : (cwd as NSString).expandingTildeInPath
+        panel.directoryURL = URL(fileURLWithPath: initial)
         if panel.runModal() == .OK, let url = panel.url {
             cwd = url.path
         }
@@ -533,8 +665,8 @@ struct DropZoneView: View {
             Image(systemName: isTargeted ? "tray.and.arrow.down.fill" : "tray.and.arrow.down")
                 .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
             Text(isTargeted
-                 ? "Bırak — klasör olarak ekle"
-                 : "JSON dosyası bırak ya da tıkla → klasör olarak ekle")
+                 ? "Drop to import as folder"
+                 : "Drop or click to import a tasks.json as folder")
                 .font(.system(size: 10))
                 .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
         }
