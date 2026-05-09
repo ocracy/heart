@@ -350,32 +350,43 @@ struct ContentView: View {
                               totalCount: Int,
                               allTasks: [DevTask]) -> some View {
         HStack(spacing: 12) {
-            HStack(spacing: 6) {
-                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 10)
-                Image(systemName: "folder.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tint)
-                Text(node.name)
-                    .font(.system(size: 11, weight: .semibold))
-                    .textCase(.uppercase)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Text(verbatim: "(\(runningCount)/\(totalCount))")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(runningCount > 0 ? Color.green : Color.secondary.opacity(0.6))
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if isCollapsed {
+            // List rows in macOS swallow .onTapGesture when the row also carries
+            // a .contextMenu and a tag — the gesture conflicts with the row's
+            // selection handling, which is why "click folder → collapse, click
+            // again → nothing happens" was reproducible. A Button doesn't fight
+            // the row recognizer the same way.
+            Button {
+                NSLog("[Heart] folder toggle: %@ (isCollapsed=%@ → %@)",
+                      node.path,
+                      "\(isCollapsed)",
+                      "\(!isCollapsed)")
+                if collapsedFolders.contains(node.path) {
                     collapsedFolders.remove(node.path)
                 } else {
                     collapsedFolders.insert(node.path)
                 }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tint)
+                    Text(node.name)
+                        .font(.system(size: 11, weight: .semibold))
+                        .textCase(.uppercase)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text(verbatim: "(\(runningCount)/\(totalCount))")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(runningCount > 0 ? Color.green : Color.secondary.opacity(0.6))
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
             HStack(spacing: 6) {
                 folderIconButton(systemName: "play.fill", tint: .green, help: "Start all tasks in folder", enabled: hasStartable(allTasks)) {
