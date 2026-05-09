@@ -161,12 +161,14 @@ struct ContentView: View {
 
             DropZoneView(isTargeted: isDropTargeted)
                 .padding(8)
-                .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-                    handleDrop(providers: providers)
-                }
                 .onTapGesture {
                     pickAndImport()
                 }
+        }
+        // Drop target spans the whole sidebar — not just the dashed footer —
+        // so files dropped anywhere in the column get imported.
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers: providers)
         }
     }
 
@@ -573,6 +575,29 @@ struct ContentView: View {
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            // Highlight tint while a file is being dragged over the welcome panel.
+            RoundedRectangle(cornerRadius: 0)
+                .fill(isDropTargeted ? Color.accentColor.opacity(0.06) : Color.clear)
+        )
+        .overlay(alignment: .top) {
+            if isDropTargeted {
+                Text("Drop heart.json to import")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule().fill(Color.accentColor.opacity(0.12))
+                    )
+                    .padding(.top, 18)
+            }
+        }
+        // The welcome panel is also a drop target — the user shouldn't have to
+        // aim at the dashed footer in the sidebar to import.
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers: providers)
+        }
     }
 
     @ViewBuilder
