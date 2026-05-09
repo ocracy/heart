@@ -182,6 +182,36 @@ struct ContentView: View {
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers: providers)
         }
+        // Big in-your-face overlay while a file is being dragged — the dashed
+        // footer hint is too easy to miss when the task list scrolls past it.
+        .overlay {
+            if isDropTargeted {
+                ZStack {
+                    Color.accentColor.opacity(0.08)
+                    VStack(spacing: 10) {
+                        Image(systemName: "tray.and.arrow.down.fill")
+                            .font(.system(size: 36, weight: .light))
+                        Text("Drop heart.json to import")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("Existing folder of the same name is refreshed.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(.ultraThinMaterial)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.accentColor.opacity(0.5),
+                                    style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                    )
+                }
+                .allowsHitTesting(false)
+            }
+        }
     }
 
     /// Picks the right row style for a task — Claude shortcuts get a sparkles row that
@@ -544,9 +574,23 @@ struct ContentView: View {
             return
         }
 
-        // Bundle has a name → auto-import everything (Claude + regular) under that folder. No prompt.
+        // Bundle has a name → auto-import everything (Claude + regular) under that folder.
+        // If the folder already exists (user dragged the same file again to refresh
+        // their config), wipe it first so we don't get duplicate "name (Copy)"-style
+        // tasks suffixed with -2, -3, etc.
         if let bundleName = bundle.name?.trimmingCharacters(in: .whitespacesAndNewlines),
            !bundleName.isEmpty {
+            let existing = store.tasksUnder(path: bundleName)
+            if !existing.isEmpty {
+                for task in existing where processManager.status(task.id).isRunning {
+                    processManager.stop(task)
+                }
+                let removeIds = Set(existing.map(\.id))
+                if let sel = selectedTaskId, removeIds.contains(sel) {
+                    selectedTaskId = nil
+                }
+                store.removeFolder(path: bundleName)
+            }
             store.append(cleaned, folder: bundleName)
             return
         }
