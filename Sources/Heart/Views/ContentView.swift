@@ -36,12 +36,25 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var activeTabs: [String: DetailTab] = [:]
 
+    /// macOS NavigationSplitView occasionally tries to auto-collapse the sidebar
+    /// in response to selection changes / window resizes / animations. We don't
+    /// want that — the sidebar should stay visible until the user explicitly
+    /// hits the toolbar button (or ⌃⌘S). Drop system-driven writes, accept
+    /// reads from `columnVisibility` so our own toggle still animates.
+    private var stableColumnVisibility: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { columnVisibility },
+            set: { _ in /* ignore */ }
+        )
+    }
+
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+        NavigationSplitView(columnVisibility: stableColumnVisibility) {
             sidebar
         } detail: {
             detail
         }
+        .navigationSplitViewStyle(.balanced)
         .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
         .toolbar {
             ToolbarItemGroup {

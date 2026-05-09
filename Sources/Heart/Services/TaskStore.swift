@@ -79,8 +79,12 @@ final class TaskStore: ObservableObject {
     private func saveSources() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(bundleSources) {
-            try? data.write(to: sourcesURL, options: .atomic)
+        do {
+            let data = try encoder.encode(bundleSources)
+            try data.write(to: sourcesURL, options: .atomic)
+        } catch {
+            // Non-fatal — sources.json is just a "Save" affordance.
+            NSLog("[TaskStore] saveSources failed: %@", "\(error)")
         }
     }
 
@@ -102,8 +106,18 @@ final class TaskStore: ObservableObject {
     func save() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(tasks) {
-            try? data.write(to: fileURL, options: .atomic)
+        do {
+            let data = try encoder.encode(tasks)
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            // The previous `try?` pair was swallowing this — and that's exactly
+            // what caused "I deleted a task and it came back after restart":
+            // the encode/write failed (e.g. transient file-system error) but
+            // the in-memory list looked correct, so the next launch read the
+            // pre-deletion file off disk. Logging via NSLog so it shows up in
+            // Console.app under "Heart".
+            NSLog("[TaskStore] save failed (path=%@, taskCount=%d): %@",
+                  fileURL.path, tasks.count, "\(error)")
         }
     }
 
