@@ -32,6 +32,7 @@ struct ContentView: View {
     @State private var pendingImport: PendingImport?
     @State private var editingTask: DevTask?
     @State private var importError: String?
+    @State private var importToast: String?
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var activeTabs: [String: DetailTab] = [:]
 
@@ -89,6 +90,7 @@ struct ContentView: View {
                 onConfirm: { folder in
                     store.append(pending.tasks, folder: folder)
                     processManager.scanForExternalServices(store.tasksUnder(path: folder))
+                    importToast = "Imported \(pending.tasks.count) task\(pending.tasks.count == 1 ? "" : "s") into '\(folder)'"
                     pendingImport = nil
                 }
             )
@@ -127,6 +129,29 @@ struct ContentView: View {
                message: {
                    Text(importError ?? "")
                })
+        .overlay(alignment: .top) {
+            if let toast = importToast {
+                Text(toast)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        Capsule().fill(Color.green.opacity(0.85))
+                    )
+                    .padding(.top, 12)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: importToast)
+        .onChange(of: importToast) { newValue in
+            // Auto-dismiss after 3 s. Capture the current value so a second toast
+            // arriving in the meantime doesn't get erased early.
+            guard let value = newValue else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                if importToast == value { importToast = nil }
+            }
+        }
     }
 
     private func toggleSidebar() {
@@ -186,9 +211,7 @@ struct ContentView: View {
         // `provider.loadItem` was racy: the async callback occasionally fired
         // after SwiftUI invalidated the view, dropping the file silently.
         .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first else { return false }
-            presentImport(for: url)
-            return true
+            handleDroppedURLs(urls)
         } isTargeted: { targeted in
             isDropTargeted = targeted
         }
@@ -579,93 +602,158 @@ struct ContentView: View {
     }
 
 
+    // MARK: - Import pipeline
+
+    /// Outcome of parsing a heart.json off disk — either a fully-resolved bundle
+    /// (auto-import under `folder`) or one that needs the user to name a folder.
+    private struct ResolvedBundle {
+        var folder: String?            // nil → ask the user for a folder name
+        var tasks: [DevTask]
+        var sourcePath: String         // remembered for "Save" later
+        var suggestedFolderName: String
+        var displayFileName: String
+    }
+
+    private enum ImportFailure: LocalizedError {
+        case unreadable(file: String, underlying: Error)
+        case unparseable(file: String, underlying: Error)
+        case empty(file: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unreadable(let file, let error):
+                return "Couldn't read \(file): \(error.localizedDescription)"
+            case .unparseable(let file, let error):
+                return "Couldn't parse \(file) as a Heart bundle.\n\n\(error.localizedDescription)"
+            case .empty(let file):
+                return "\(file) had no tasks with a `command` — nothing to import."
+            }
+        }
+    }
+
+    /// Drop callback. Runs synchronously on the main actor — see dropDestination.
+    private func handleDroppedURLs(_ urls: [URL]) -> Bool {
+        guard let url = urls.first else {
+            importError = "Drop didn't contain a file URL."
+            return false
+        }
+        presentImport(for: url)
+        return true
+    }
+
     private func presentImport(for url: URL) {
-        // Some sandboxing scenarios hand us a security-scoped URL — start access
-        // before reading and stop after we're done.
+        do {
+            let resolved = try parseImport(at: url)
+            applyImport(resolved)
+        } catch let failure as ImportFailure {
+            importError = failure.errorDescription
+        } catch {
+            importError = "Import failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Read + decode + normalize, no store mutations. Throws `ImportFailure`.
+    private func parseImport(at url: URL) throws -> ResolvedBundle {
+        // Sandboxed Finder URLs need scoped access before reading.
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+
+        let displayName = url.lastPathComponent
 
         let data: Data
         do {
             data = try Data(contentsOf: url)
         } catch {
-            importError = "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)"
-            return
+            throw ImportFailure.unreadable(file: displayName, underlying: error)
         }
 
-        // Two accepted shapes:
-        //   { "name": "MyProject", "tasks": [...] }   ← preferred — auto-imports under "name"
-        //   [ {...}, {...} ]                          ← legacy bare array — falls through to prompt
-        let bundle: TaskBundle
-        if let parsed = try? JSONDecoder().decode(TaskBundle.self, from: data) {
-            bundle = parsed
-        } else if let arr = try? JSONDecoder().decode([DevTask].self, from: data) {
-            bundle = TaskBundle(name: nil, tasks: arr)
-        } else {
-            // Surface the actual decoding error so users know what's wrong.
-            do {
-                _ = try JSONDecoder().decode(TaskBundle.self, from: data)
-            } catch {
-                importError = "Couldn't parse \(url.lastPathComponent) as a Heart bundle: \(error.localizedDescription)"
-            }
-            return
-        }
+        let bundle = try decodeBundle(data: data, fileName: displayName)
+        let stem = url.deletingPathExtension().lastPathComponent
 
-        let fileName = url.deletingPathExtension().lastPathComponent
         let normalized = bundle.tasks.map { task -> DevTask in
             var t = task
-            if t.name.trimmingCharacters(in: .whitespaces).isEmpty {
-                t.name = fileName
-            }
+            if t.name.trimmingCharacters(in: .whitespaces).isEmpty { t.name = stem }
             return t
         }
         let cleaned = normalized.filter {
             !$0.command.trimmingCharacters(in: .whitespaces).isEmpty
         }
         guard !cleaned.isEmpty else {
-            importError = "\(url.lastPathComponent) had no tasks with a `command`."
-            return
+            throw ImportFailure.empty(file: displayName)
         }
 
-        // Bundle has a name → auto-import everything (Claude + regular) under that folder.
-        // If the folder already exists (user dragged the same file again to refresh
-        // their config), wipe it first so we don't get duplicate "name (Copy)"-style
-        // tasks suffixed with -2, -3, etc.
-        if let bundleName = bundle.name?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !bundleName.isEmpty {
-            let existing = store.tasksUnder(path: bundleName)
-            let needSelectionFix = selectedTaskId.map { Set(existing.map(\.id)).contains($0) } ?? true
-            if !existing.isEmpty {
-                for task in existing where processManager.status(task.id).isRunning {
-                    processManager.stop(task)
-                }
-                store.removeFolder(path: bundleName)
-            }
-            store.append(cleaned, folder: bundleName)
-            // Remember where this bundle came from so the folder's "Save"
-            // context menu writes back to the same file later.
-            store.setBundleSource(folder: bundleName, path: url.path)
-            // Drop the user out of the welcome screen / dangling selection straight
-            // into the freshly-imported folder.
-            if needSelectionFix {
-                selectedTaskId = store.tasksUnder(path: bundleName).first?.id
-                    ?? store.tasks.first?.id
-            }
-            // Light up rows whose port is already bound by some other process.
-            processManager.scanForExternalServices(store.tasksUnder(path: bundleName))
-            return
-        }
+        let trimmedFolder = bundle.name?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty()
 
-        // No bundle name (legacy array): prompt for the folder name.
-        let suggestedName = fileName
+        let suggested = stem
             .replacingOccurrences(of: "_", with: " ")
             .replacingOccurrences(of: "-", with: " ")
             .capitalized
-        pendingImport = PendingImport(
+
+        return ResolvedBundle(
+            folder: trimmedFolder,
             tasks: cleaned,
-            suggestedName: suggestedName,
-            sourceFile: url.lastPathComponent
+            sourcePath: url.path,
+            suggestedFolderName: suggested,
+            displayFileName: displayName
         )
+    }
+
+    /// Try the bundle shape first, fall back to a bare DevTask array. Both shapes
+    /// failing → re-decode as a bundle to surface the most useful error message.
+    private func decodeBundle(data: Data, fileName: String) throws -> TaskBundle {
+        if let parsed = try? JSONDecoder().decode(TaskBundle.self, from: data) {
+            return parsed
+        }
+        if let array = try? JSONDecoder().decode([DevTask].self, from: data) {
+            return TaskBundle(name: nil, tasks: array)
+        }
+        do {
+            return try JSONDecoder().decode(TaskBundle.self, from: data)
+        } catch {
+            throw ImportFailure.unparseable(file: fileName, underlying: error)
+        }
+    }
+
+    /// Mutate the store + select / scan / report. Pure side effects; safe to call
+    /// only after `parseImport` succeeded.
+    private func applyImport(_ resolved: ResolvedBundle) {
+        guard let folder = resolved.folder else {
+            // Bundle had no top-level name → ask user where to put the tasks.
+            pendingImport = PendingImport(
+                tasks: resolved.tasks,
+                suggestedName: resolved.suggestedFolderName,
+                sourceFile: resolved.displayFileName
+            )
+            return
+        }
+
+        // Refresh-on-collision: same folder name = user updated their config and
+        // re-dropped. Replace the contents instead of suffixing duplicates.
+        let existing = store.tasksUnder(path: folder)
+        let selectionWasInsideFolder = selectedTaskId.map {
+            Set(existing.map(\.id)).contains($0)
+        } ?? false
+
+        if !existing.isEmpty {
+            for task in existing where processManager.status(task.id).isRunning {
+                processManager.stop(task)
+            }
+            store.removeFolder(path: folder)
+        }
+        store.append(resolved.tasks, folder: folder)
+        store.setBundleSource(folder: folder, path: resolved.sourcePath)
+
+        // Auto-select inside the folder if the user was on the welcome screen
+        // or had a now-deleted task selected.
+        if selectedTaskId == nil || selectionWasInsideFolder {
+            selectedTaskId = store.tasksUnder(path: folder).first?.id
+                ?? store.tasks.first?.id
+        }
+
+        processManager.scanForExternalServices(store.tasksUnder(path: folder))
+        importToast = "Imported \(resolved.tasks.count) task\(resolved.tasks.count == 1 ? "" : "s") into '\(folder)'"
     }
 
     @ViewBuilder
@@ -751,9 +839,7 @@ struct ContentView: View {
         // Welcome panel mirrors the sidebar drop target so a brand-new user
         // doesn't have to aim at the sidebar at all.
         .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first else { return false }
-            presentImport(for: url)
-            return true
+            handleDroppedURLs(urls)
         } isTargeted: { targeted in
             isDropTargeted = targeted
         }
@@ -1352,4 +1438,10 @@ struct ImportFolderPrompt: View {
         guard !trimmed.isEmpty else { return }
         onConfirm(trimmed)
     }
+}
+
+private extension String {
+    /// Returns nil when the string is empty — useful for converting empty form
+    /// fields into truly absent optionals at the boundary.
+    func nilIfEmpty() -> String? { isEmpty ? nil : self }
 }
