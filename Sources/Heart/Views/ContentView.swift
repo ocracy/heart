@@ -33,29 +33,28 @@ struct ContentView: View {
     @State private var editingTask: DevTask?
     @State private var importError: String?
     @State private var importToast: String?
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// We pin the underlying NavigationSplitView visibility to `.all` and instead
+    /// drive the "hide sidebar" feature ourselves via a conditional layout —
+    /// macOS auto-collapses the column on selection / window changes when we
+    /// hand SwiftUI a binding it can write to, even with the previous
+    /// no-op-setter trick.
+    @State private var sidebarHidden: Bool = false
     @State private var activeTabs: [String: DetailTab] = [:]
 
-    /// macOS NavigationSplitView occasionally tries to auto-collapse the sidebar
-    /// in response to selection changes / window resizes / animations. We don't
-    /// want that — the sidebar should stay visible until the user explicitly
-    /// hits the toolbar button (or ⌃⌘S). Drop system-driven writes, accept
-    /// reads from `columnVisibility` so our own toggle still animates.
-    private var stableColumnVisibility: Binding<NavigationSplitViewVisibility> {
-        Binding(
-            get: { columnVisibility },
-            set: { _ in /* ignore */ }
-        )
-    }
-
     var body: some View {
-        NavigationSplitView(columnVisibility: stableColumnVisibility) {
-            sidebar
-        } detail: {
-            detail
+        Group {
+            if sidebarHidden {
+                detail
+            } else {
+                NavigationSplitView(columnVisibility: .constant(.all)) {
+                    sidebar
+                } detail: {
+                    detail
+                }
+                .navigationSplitViewStyle(.balanced)
+                .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
+            }
         }
-        .navigationSplitViewStyle(.balanced)
-        .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -123,13 +122,24 @@ struct ContentView: View {
             )
         }
         .onAppear {
+            NSLog("[Heart] ContentView onAppear — %d task(s), selectedTaskId=%@",
+                  store.tasks.count, selectedTaskId ?? "nil")
             if selectedTaskId == nil {
                 selectedTaskId = store.tasks.first?.id
             }
-            // First-pass scan: anything with a port already bound by some other
-            // process (redis on :6379, postgres, a leftover dev server) shows up
-            // as running so the dot is green from the start.
             processManager.scanForExternalServices(store.tasks)
+        }
+        .onChange(of: selectedTaskId) { newId in
+            NSLog("[Heart] selectedTaskId → %@ (sidebarHidden=%@, taskCount=%d)",
+                  newId ?? "nil",
+                  "\(sidebarHidden)",
+                  store.tasks.count)
+        }
+        .onChange(of: sidebarHidden) { newValue in
+            NSLog("[Heart] sidebarHidden → %@", "\(newValue)")
+        }
+        .onChange(of: store.tasks.count) { newCount in
+            NSLog("[Heart] store.tasks.count → %d", newCount)
         }
         .alert("Import failed",
                isPresented: Binding(
@@ -168,12 +178,7 @@ struct ContentView: View {
     }
 
     private func toggleSidebar() {
-        switch columnVisibility {
-        case .detailOnly:
-            columnVisibility = .all
-        default:
-            columnVisibility = .detailOnly
-        }
+        sidebarHidden.toggle()
     }
 
     private func showBrowser(for task: DevTask) {
@@ -646,6 +651,9 @@ struct ContentView: View {
 
     /// Drop callback. Runs synchronously on the main actor — see dropDestination.
     private func handleDroppedURLs(_ urls: [URL]) -> Bool {
+        NSLog("[Heart] drop received: %d url(s) — %@",
+              urls.count,
+              urls.map(\.path).joined(separator: ", "))
         guard let url = urls.first else {
             importError = "Drop didn't contain a file URL."
             return false
@@ -655,12 +663,18 @@ struct ContentView: View {
     }
 
     private func presentImport(for url: URL) {
+        NSLog("[Heart] presentImport: %@", url.path)
         do {
             let resolved = try parseImport(at: url)
+            NSLog("[Heart] parsed bundle '%@' (%d task(s))",
+                  resolved.folder ?? "<unnamed>", resolved.tasks.count)
             applyImport(resolved)
+            NSLog("[Heart] applyImport done — store now has %d task(s)", store.tasks.count)
         } catch let failure as ImportFailure {
+            NSLog("[Heart] import failed: %@", failure.errorDescription ?? "unknown")
             importError = failure.errorDescription
         } catch {
+            NSLog("[Heart] import failed (other): %@", "\(error)")
             importError = "Import failed: \(error.localizedDescription)"
         }
     }
