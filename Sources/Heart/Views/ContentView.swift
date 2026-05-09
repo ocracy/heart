@@ -177,10 +177,15 @@ struct ContentView: View {
                     pickAndImport()
                 }
         }
-        // Drop target spans the whole sidebar — not just the dashed footer —
-        // so files dropped anywhere in the column get imported.
-        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-            handleDrop(providers: providers)
+        // Use the modern Transferable-based API — earlier `onDrop` +
+        // `provider.loadItem` was racy: the async callback occasionally fired
+        // after SwiftUI invalidated the view, dropping the file silently.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first else { return false }
+            presentImport(for: url)
+            return true
+        } isTargeted: { targeted in
+            isDropTargeted = targeted
         }
         // Big in-your-face overlay while a file is being dragged — the dashed
         // footer hint is too easy to miss when the task list scrolls past it.
@@ -495,36 +500,6 @@ struct ContentView: View {
         store.removeFolder(path: path)
     }
 
-    private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-        let fileType = UTType.fileURL.identifier
-        guard provider.hasItemConformingToTypeIdentifier(fileType) else { return false }
-
-        // `loadItem` accepts every shape the system might hand us — Data, NSURL,
-        // String — whereas `loadDataRepresentation` was silently failing for some
-        // Finder drops on macOS 14+.
-        provider.loadItem(forTypeIdentifier: fileType, options: nil) { item, error in
-            let resolved: URL? = {
-                if let data = item as? Data {
-                    return URL(dataRepresentation: data, relativeTo: nil, isAbsolute: true)
-                }
-                if let url = item as? URL { return url }
-                if let nsurl = item as? NSURL { return nsurl as URL }
-                if let path = item as? String { return URL(fileURLWithPath: path) }
-                return nil
-            }()
-            DispatchQueue.main.async {
-                if let url = resolved {
-                    presentImport(for: url)
-                } else if let error {
-                    importError = "Couldn't read the dropped file: \(error.localizedDescription)"
-                } else {
-                    importError = "Couldn't read the dropped file (unknown content type)."
-                }
-            }
-        }
-        return true
-    }
 
     private func presentImport(for url: URL) {
         // Some sandboxing scenarios hand us a security-scoped URL — start access
@@ -581,17 +556,20 @@ struct ContentView: View {
         if let bundleName = bundle.name?.trimmingCharacters(in: .whitespacesAndNewlines),
            !bundleName.isEmpty {
             let existing = store.tasksUnder(path: bundleName)
+            let needSelectionFix = selectedTaskId.map { Set(existing.map(\.id)).contains($0) } ?? true
             if !existing.isEmpty {
                 for task in existing where processManager.status(task.id).isRunning {
                     processManager.stop(task)
                 }
-                let removeIds = Set(existing.map(\.id))
-                if let sel = selectedTaskId, removeIds.contains(sel) {
-                    selectedTaskId = nil
-                }
                 store.removeFolder(path: bundleName)
             }
             store.append(cleaned, folder: bundleName)
+            // Drop the user out of the welcome screen / dangling selection straight
+            // into the freshly-imported folder.
+            if needSelectionFix {
+                selectedTaskId = store.tasksUnder(path: bundleName).first?.id
+                    ?? store.tasks.first?.id
+            }
             return
         }
 
@@ -687,10 +665,14 @@ struct ContentView: View {
                     .padding(.top, 18)
             }
         }
-        // The welcome panel is also a drop target — the user shouldn't have to
-        // aim at the dashed footer in the sidebar to import.
-        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-            handleDrop(providers: providers)
+        // Welcome panel mirrors the sidebar drop target so a brand-new user
+        // doesn't have to aim at the sidebar at all.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first else { return false }
+            presentImport(for: url)
+            return true
+        } isTargeted: { targeted in
+            isDropTargeted = targeted
         }
     }
 
