@@ -3,6 +3,7 @@ import SwiftUI
 struct TaskRow: View {
     let task: DevTask
     @ObservedObject var processManager: ProcessManager
+    var onShowBrowser: (() -> Void)? = nil
 
     private var status: TaskStatus { processManager.status(task.id) }
 
@@ -36,6 +37,14 @@ struct TaskRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 10) {
+                if task.url != nil, let onShowBrowser {
+                    iconButton(systemName: "globe",
+                               tint: .blue,
+                               help: "Open URL in built-in browser") {
+                        onShowBrowser()
+                    }
+                }
+
                 if let port = task.port {
                     iconButton(systemName: "bolt.slash.fill",
                                tint: .orange,

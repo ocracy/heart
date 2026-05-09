@@ -2,6 +2,25 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+enum DetailTab: String, CaseIterable, Hashable {
+    case terminal
+    case browser
+
+    var label: String {
+        switch self {
+        case .terminal: return "Terminal"
+        case .browser: return "Browser"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .terminal: return "terminal"
+        case .browser: return "globe"
+        }
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var store: TaskStore
     @ObservedObject var processManager: ProcessManager
@@ -12,22 +31,33 @@ struct ContentView: View {
     @State private var isDropTargeted = false
     @State private var pendingImport: PendingImport?
     @State private var editingTask: DevTask?
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var activeTabs: [String: DetailTab] = [:]
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
         } detail: {
             detail
         }
-        .navigationSplitViewColumnWidth(min: 320, ideal: 360, max: 500)
+        .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
         .toolbar {
             ToolbarItemGroup {
+                Button {
+                    toggleSidebar()
+                } label: {
+                    Label("Toggle Sidebar", systemImage: "sidebar.left")
+                }
+                .keyboardShortcut("s", modifiers: [.command, .control])
+                .help("Toggle sidebar (⌃⌘S)")
+
                 Button {
                     processManager.startAll(store.tasks)
                 } label: {
                     Label("Start All", systemImage: "play.circle.fill")
                 }
                 .help("Start every task")
+                .disabled(!hasStartable(store.tasks))
 
                 Button {
                     processManager.stopAll(store.tasks)
@@ -35,6 +65,7 @@ struct ContentView: View {
                     Label("Stop All", systemImage: "stop.circle.fill")
                 }
                 .help("Stop every task")
+                .disabled(!hasStoppable(store.tasks))
 
                 Spacer()
 
@@ -81,14 +112,46 @@ struct ContentView: View {
         }
     }
 
+    private func toggleSidebar() {
+        switch columnVisibility {
+        case .detailOnly:
+            columnVisibility = .all
+        default:
+            columnVisibility = .detailOnly
+        }
+    }
+
+    private func showBrowser(for task: DevTask) {
+        selectedTaskId = task.id
+        if task.url != nil {
+            activeTabs[task.id] = .browser
+        }
+    }
+
+    // MARK: - tab management
+
+    /// Tabs available for a regular (non-Claude) task. Fixed by task config — Browser only
+    /// shows up when a URL is set. Tabs are not closeable; switching is the only interaction.
+    private func tabs(for task: DevTask) -> [DetailTab] {
+        task.url == nil ? [.terminal] : [.terminal, .browser]
+    }
+
+    private func activeTab(for task: DevTask) -> DetailTab {
+        let available = tabs(for: task)
+        if let recorded = activeTabs[task.id], available.contains(recorded) { return recorded }
+        return available.first ?? .terminal
+    }
+
+    private func setActive(_ tab: DetailTab, for taskId: String) {
+        activeTabs[taskId] = tab
+    }
+
     private var sidebar: some View {
         VStack(spacing: 0) {
             List(selection: $selectedTaskId) {
                 let root = store.buildTree()
                 ForEach(root.tasks) { task in
-                    TaskRow(task: task, processManager: processManager)
-                        .tag(task.id)
-                        .contextMenu { rowMenu(for: task) }
+                    sidebarRow(task: task)
                 }
                 ForEach(root.subfolders, id: \.path) { node in
                     folderTree(node: node, depth: 0)
@@ -104,6 +167,45 @@ struct ContentView: View {
                 .onTapGesture {
                     pickAndImport()
                 }
+        }
+    }
+
+    /// Picks the right row style for a task — Claude shortcuts get a sparkles row that
+    /// hides start/stop buttons (multi-session, opened by tapping); everything else uses TaskRow.
+    @ViewBuilder
+    private func sidebarRow(task: DevTask) -> some View {
+        if task.isClaudeShortcut {
+            ClaudeShortcutRow(task: task, isSelected: selectedTaskId == task.id) {
+                selectedTaskId = task.id
+            }
+            .tag(task.id)
+            .contextMenu { claudeRowMenu(for: task) }
+        } else {
+            TaskRow(task: task,
+                    processManager: processManager,
+                    onShowBrowser: { showBrowser(for: task) })
+                .tag(task.id)
+                .contextMenu { rowMenu(for: task) }
+        }
+    }
+
+    @ViewBuilder
+    private func claudeRowMenu(for task: DevTask) -> some View {
+        Button {
+            editingTask = task
+        } label: {
+            Label("Edit…", systemImage: "pencil")
+        }
+        Button {
+            duplicateTask(task)
+        } label: {
+            Label("Duplicate", systemImage: "plus.square.on.square")
+        }
+        Divider()
+        Button(role: .destructive) {
+            deleteTask(task)
+        } label: {
+            Label("Delete", systemImage: "trash")
         }
     }
 
@@ -134,9 +236,7 @@ struct ContentView: View {
                              allTasks: allTasks)
                 if !isCollapsed {
                     ForEach(node.tasks) { task in
-                        TaskRow(task: task, processManager: processManager)
-                            .tag(task.id)
-                            .contextMenu { rowMenu(for: task) }
+                        sidebarRow(task: task)
                             .padding(.leading, CGFloat((depth + 1) * 14))
                     }
                     ForEach(node.subfolders, id: \.path) { sub in
@@ -183,13 +283,13 @@ struct ContentView: View {
             }
 
             HStack(spacing: 6) {
-                folderIconButton(systemName: "play.fill", tint: .green, help: "Start all tasks in folder") {
+                folderIconButton(systemName: "play.fill", tint: .green, help: "Start all tasks in folder", enabled: hasStartable(allTasks)) {
                     processManager.startAll(allTasks)
                 }
-                folderIconButton(systemName: "stop.fill", tint: .red, help: "Stop all tasks in folder") {
+                folderIconButton(systemName: "stop.fill", tint: .red, help: "Stop all tasks in folder", enabled: hasStoppable(allTasks)) {
                     processManager.stopAll(allTasks)
                 }
-                folderIconButton(systemName: "arrow.clockwise", tint: .secondary, help: "Restart all tasks in folder") {
+                folderIconButton(systemName: "arrow.clockwise", tint: .secondary, help: "Restart all tasks in folder", enabled: !allTasks.isEmpty) {
                     for task in allTasks { processManager.restart(task) }
                 }
             }
@@ -203,12 +303,15 @@ struct ContentView: View {
             Button { processManager.startAll(allTasks) } label: {
                 Label("Start all", systemImage: "play.fill")
             }
+            .disabled(!hasStartable(allTasks))
             Button { processManager.stopAll(allTasks) } label: {
                 Label("Stop all", systemImage: "stop.fill")
             }
+            .disabled(!hasStoppable(allTasks))
             Button { for task in allTasks { processManager.restart(task) } } label: {
                 Label("Restart all", systemImage: "arrow.clockwise")
             }
+            .disabled(allTasks.isEmpty)
             Divider()
             Button(role: .destructive) {
                 deleteFolder(path: node.path)
@@ -222,23 +325,38 @@ struct ContentView: View {
     private func folderIconButton(systemName: String,
                                   tint: Color,
                                   help: String,
+                                  enabled: Bool = true,
                                   action: @escaping () -> Void) -> some View {
+        let activeTint = enabled ? tint : Color.secondary.opacity(0.5)
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(tint)
+                .foregroundStyle(activeTint)
                 .frame(width: 24, height: 24)
                 .background(
                     RoundedRectangle(cornerRadius: 5)
-                        .fill(tint.opacity(0.12))
+                        .fill(activeTint.opacity(0.12))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 5)
-                        .stroke(tint.opacity(0.25), lineWidth: 0.5)
+                        .stroke(activeTint.opacity(0.25), lineWidth: 0.5)
                 )
         }
         .buttonStyle(.plain)
         .help(help)
+        .disabled(!enabled)
+        .opacity(enabled ? 1.0 : 0.55)
+    }
+
+    /// True when at least one task is not currently alive — i.e. clicking "start" would do something.
+    /// Treats `.starting` as already-alive so we don't re-fire start on a task that's already coming up.
+    private func hasStartable(_ tasks: [DevTask]) -> Bool {
+        tasks.contains { !processManager.status($0.id).isRunning }
+    }
+
+    /// True when at least one task is currently alive (running / starting / stopping) and could be stopped.
+    private func hasStoppable(_ tasks: [DevTask]) -> Bool {
+        tasks.contains { processManager.status($0.id).isRunning }
     }
 
     @ViewBuilder
@@ -261,12 +379,54 @@ struct ContentView: View {
         } label: {
             Label("Edit…", systemImage: "pencil")
         }
+        Button {
+            duplicateTask(task)
+        } label: {
+            Label("Duplicate", systemImage: "plus.square.on.square")
+        }
+        Button {
+            openClaudeHere(for: task)
+        } label: {
+            Label("Open Claude Here", systemImage: "sparkles")
+        }
         Divider()
         Button(role: .destructive) {
             deleteTask(task)
         } label: {
             Label("Delete", systemImage: "trash")
         }
+    }
+
+    private func duplicateTask(_ task: DevTask) {
+        let copy = DevTask(
+            id: UUID().uuidString,
+            name: task.name + " (Copy)",
+            command: task.command,
+            cwd: task.cwd,
+            port: task.port,
+            url: task.url,
+            autoStart: false,
+            folder: task.folder,
+            kind: task.kind
+        )
+        store.upsert(copy)
+        selectedTaskId = copy.id
+    }
+
+    private func openClaudeHere(for task: DevTask) {
+        let claudeTask = DevTask(
+            id: UUID().uuidString,
+            name: task.name + " • Claude",
+            command: "claude",
+            cwd: task.cwd,
+            port: nil,
+            url: nil,
+            autoStart: false,
+            folder: task.folder
+        )
+        store.upsert(claudeTask)
+        selectedTaskId = claudeTask.id
+        processManager.start(claudeTask)
     }
 
     private func deleteTask(_ task: DevTask) {
@@ -306,18 +466,41 @@ struct ContentView: View {
     }
 
     private func presentImport(for url: URL) {
-        guard let data = try? Data(contentsOf: url) else {
+        guard let data = try? Data(contentsOf: url) else { return }
+        // Two accepted shapes:
+        //   { "name": "Maatrics", "tasks": [...] }   ← preferred — auto-imports under "name"
+        //   [ {...}, {...} ]                          ← legacy bare array — falls through to prompt
+        let bundle: TaskBundle
+        if let parsed = try? JSONDecoder().decode(TaskBundle.self, from: data) {
+            bundle = parsed
+        } else if let arr = try? JSONDecoder().decode([DevTask].self, from: data) {
+            bundle = TaskBundle(name: nil, tasks: arr)
+        } else {
             return
         }
-        guard let decoded = try? JSONDecoder().decode([DevTask].self, from: data) else {
-            return
+
+        let fileName = url.deletingPathExtension().lastPathComponent
+        let normalized = bundle.tasks.map { task -> DevTask in
+            var t = task
+            if t.name.trimmingCharacters(in: .whitespaces).isEmpty {
+                t.name = fileName
+            }
+            return t
         }
-        let cleaned = decoded.filter {
-            !$0.name.trimmingCharacters(in: .whitespaces).isEmpty &&
+        let cleaned = normalized.filter {
             !$0.command.trimmingCharacters(in: .whitespaces).isEmpty
         }
         guard !cleaned.isEmpty else { return }
-        let suggestedName = url.deletingPathExtension().lastPathComponent
+
+        // Bundle has a name → auto-import everything (Claude + regular) under that folder. No prompt.
+        if let bundleName = bundle.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !bundleName.isEmpty {
+            store.append(cleaned, folder: bundleName)
+            return
+        }
+
+        // No bundle name (legacy array): prompt for the folder name.
+        let suggestedName = fileName
             .replacingOccurrences(of: "_", with: " ")
             .replacingOccurrences(of: "-", with: " ")
             .capitalized
@@ -331,54 +514,11 @@ struct ContentView: View {
     @ViewBuilder
     private var detail: some View {
         if let id = selectedTaskId, let task = store.tasks.first(where: { $0.id == id }) {
-            VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(processManager.status(id).color)
-                        .frame(width: 8, height: 8)
-                    Text(task.name)
-                        .font(.headline)
-                    Text("·")
-                        .foregroundStyle(.secondary)
-                    Text(processManager.status(id).label)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if let port = task.port {
-                        Button {
-                            processManager.killPort(port, for: id)
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "bolt.slash.fill")
-                                Text(verbatim: "KILL PORT :\(port)")
-                            }
-                            .font(.system(size: 11, weight: .semibold))
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.orange)
-                        .help(Text(verbatim: "Kills any process listening on :\(port)"))
-                    }
-                    Button {
-                        processManager.clearOutput(id)
-                    } label: {
-                        Label("Clear", systemImage: "eraser")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Clear output buffer")
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.ultraThinMaterial)
-
-                Divider()
-
-                OutputView(
-                    text: processManager.output(id),
-                    isInteractive: processManager.status(id).isRunning,
-                    onInput: { data in
-                        processManager.sendInput(id, data: data)
-                    }
-                )
+            if task.isClaudeShortcut {
+                ClaudeDetailView(task: task, processManager: processManager)
+                    .id("claude-\(id)")
+            } else {
+                regularDetail(task: task, id: id)
             }
         } else {
             VStack(spacing: 12) {
@@ -394,6 +534,184 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
+
+    @ViewBuilder
+    private func regularDetail(task: DevTask, id: String) -> some View {
+        let availableTabs = tabs(for: task)
+        let active = activeTab(for: task)
+        VStack(spacing: 0) {
+            detailTopBar(task: task, availableTabs: availableTabs, active: active)
+            Divider()
+            tabContent(task: task, availableTabs: availableTabs, active: active)
+        }
+    }
+
+    @ViewBuilder
+    private func detailTopBar(task: DevTask,
+                              availableTabs: [DetailTab],
+                              active: DetailTab) -> some View {
+        let id = task.id
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(processManager.status(id).color)
+                    .frame(width: 8, height: 8)
+                Text(task.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("·")
+                    .foregroundStyle(.secondary)
+                Text(processManager.status(id).label)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                if let port = task.port {
+                    Button {
+                        processManager.killPort(port, for: id)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "bolt.slash.fill")
+                            Text(verbatim: "KILL PORT :\(port)")
+                        }
+                        .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .help(Text(verbatim: "Kills any process listening on :\(port)"))
+                }
+                if active == .terminal {
+                    Button {
+                        processManager.clearOutput(id)
+                    } label: {
+                        Label("Clear", systemImage: "eraser")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Clear terminal buffer")
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            // Tab bar — fixed list, no close/+. Only switches active tab.
+            HStack(spacing: 6) {
+                ForEach(availableTabs, id: \.self) { tab in
+                    tabPill(tab: tab, isActive: tab == active, taskId: id)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 6)
+        }
+        .background(.ultraThinMaterial)
+    }
+
+    @ViewBuilder
+    private func tabPill(tab: DetailTab, isActive: Bool, taskId: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: tab.icon)
+                .font(.system(size: 10))
+            Text(tab.label)
+                .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isActive ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isActive ? Color.accentColor.opacity(0.6) : Color.secondary.opacity(0.2),
+                        lineWidth: 0.5)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            setActive(tab, for: taskId)
+        }
+    }
+
+    @ViewBuilder
+    private func tabContent(task: DevTask,
+                            availableTabs: [DetailTab],
+                            active: DetailTab) -> some View {
+        let id = task.id
+        let isRunning = processManager.status(id).isRunning
+        ZStack {
+            // Terminal layer — always rendered so the persistent SwiftTerm view stays mounted
+            // (preserves cursor / scrollback / TUI state across tab switches).
+            ZStack {
+                OutputView(terminalView: processManager.terminalView(for: id))
+                if !isRunning {
+                    activateOverlay(task: task)
+                }
+            }
+            .opacity(active == .terminal ? 1 : 0)
+            .allowsHitTesting(active == .terminal)
+
+            // Browser layer — only present when this task has a URL.
+            if availableTabs.contains(.browser), let url = task.url {
+                BrowserView(url: url)
+                    .id("browser-\(id)")
+                    .opacity(active == .browser ? 1 : 0)
+                    .allowsHitTesting(active == .browser)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func activateOverlay(task: DevTask) -> some View {
+        let status = processManager.status(task.id)
+        let isStarting = status == .starting
+        let crashedCode: Int32? = {
+            if case let .crashed(code) = status { return code }
+            return nil
+        }()
+        VStack(spacing: 14) {
+            Image(systemName: isStarting ? "hourglass" : "bolt.circle.fill")
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(isStarting ? Color.yellow : Color.accentColor)
+
+            VStack(spacing: 4) {
+                if let code = crashedCode {
+                    Text("Crashed (exit \(code))")
+                        .font(.title3.bold())
+                        .foregroundStyle(.red)
+                } else if isStarting {
+                    Text("Starting…")
+                        .font(.title3.bold())
+                } else {
+                    Text("Terminal idle")
+                        .font(.title3.bold())
+                }
+                Text(verbatim: task.command)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+            }
+
+            Button {
+                processManager.start(task)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "play.fill")
+                    Text(crashedCode != nil ? "Restart" : "Activate")
+                        .fontWeight(.semibold)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(isStarting)
+            .keyboardShortcut(.defaultAction)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.ultraThinMaterial)
+    }
 }
 
 struct EditTaskSheet: View {
@@ -405,8 +723,10 @@ struct EditTaskSheet: View {
     @State private var command: String
     @State private var cwd: String
     @State private var portText: String
+    @State private var url: String
     @State private var folder: String
     @State private var autoStart: Bool
+    @State private var isClaudeShortcut: Bool
 
     init(task: DevTask, onCancel: @escaping () -> Void, onSave: @escaping (DevTask) -> Void) {
         self.task = task
@@ -416,8 +736,10 @@ struct EditTaskSheet: View {
         _command = State(initialValue: task.command)
         _cwd = State(initialValue: task.cwd)
         _portText = State(initialValue: task.port.map { String($0) } ?? "")
+        _url = State(initialValue: task.url ?? "")
         _folder = State(initialValue: task.folder ?? "")
         _autoStart = State(initialValue: task.autoStart)
+        _isClaudeShortcut = State(initialValue: task.isClaudeShortcut)
     }
 
     var body: some View {
@@ -461,6 +783,29 @@ struct EditTaskSheet: View {
                             styledTextField(placeholder: "Backend", text: $folder)
                         }
                     }
+
+                    field(label: "URL",
+                          hint: "Optional. Adds a globe icon to open this URL in the in-app browser.") {
+                        styledTextField(placeholder: "http://localhost:3000",
+                                        text: $url,
+                                        monospaced: true)
+                    }
+
+                    Toggle(isOn: $isClaudeShortcut) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "sparkles")
+                                    .foregroundStyle(Color.purple)
+                                Text("Claude shortcut")
+                                    .font(.system(size: 13, weight: .medium))
+                            }
+                            Text("Pins this task at the top of the sidebar and lets you open multiple parallel terminal sessions for it (e.g. several `claude` chats in the same dir).")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .toggleStyle(.switch)
 
                     Toggle(isOn: $autoStart) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -628,6 +973,7 @@ struct EditTaskSheet: View {
     private func commit() {
         let trimmedFolder = folder.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
         let port: Int? = Int(portText.trimmingCharacters(in: .whitespaces))
         let updated = DevTask(
             id: task.id,
@@ -635,8 +981,10 @@ struct EditTaskSheet: View {
             command: command.trimmingCharacters(in: .whitespaces),
             cwd: cwd.trimmingCharacters(in: .whitespaces),
             port: port,
+            url: trimmedURL.isEmpty ? nil : trimmedURL,
             autoStart: autoStart,
-            folder: trimmedFolder.isEmpty ? nil : trimmedFolder
+            folder: trimmedFolder.isEmpty ? nil : trimmedFolder,
+            kind: isClaudeShortcut ? "claude" : nil
         )
         onSave(updated)
     }

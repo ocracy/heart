@@ -148,7 +148,9 @@ final class TaskStore: ObservableObject {
         }
     }
 
-    /// Build a hierarchical tree of folders + tasks.
+    /// Build a hierarchical tree of folders + tasks. Claude shortcuts are placed in the
+    /// tree alongside regular tasks (so they get scoped under each imported bundle's folder),
+    /// but render with a different row style.
     /// `folder` values may be slash-separated paths (e.g. "Maatrics/Frontend") for nesting.
     func buildTree() -> FolderNode {
         let root = FolderNode(name: "", path: "")

@@ -1,61 +1,78 @@
-[
-  {
-    "autoStart": false,
-    "command": "python3 -m http.server 8000",
-    "cwd": "~/Sites",
-    "id": "static-site",
-    "name": "Static site (8000)",
-    "port": 8000
-  },
-  {
-    "autoStart": false,
-    "command": "tail -f /var/log/system.log",
-    "cwd": "~",
-    "id": "system-logs",
-    "name": "System logs"
-  },
-  {
-    "autoStart": false,
-    "command": "ngrok http 3000",
-    "cwd": "~",
-    "folder": "Tools",
-    "id": "ngrok",
-    "name": "ngrok tunnel"
-  },
-  {
-    "autoStart": false,
-    "command": "npm run dev",
-    "cwd": "~/projects/web",
-    "folder": "Frontend",
-    "id": "web-dev",
-    "name": "Web dev server",
-    "port": 3000
-  },
-  {
-    "autoStart": false,
-    "command": "npm run dev",
-    "cwd": "~/projects/admin",
-    "folder": "Frontend",
-    "id": "admin-dev",
-    "name": "Admin dev server",
-    "port": 3001
-  },
-  {
-    "autoStart": false,
-    "command": "npm run start",
-    "cwd": "~/projects/api",
-    "folder": "Backend",
-    "id": "api-server",
-    "name": "API server",
-    "port": 4000
-  },
-  {
-    "autoStart": false,
-    "command": "redis-server",
-    "cwd": "~",
-    "folder": "Backend",
-    "id": "redis",
-    "name": "Redis",
-    "port": 6379
-  }
-]
+{
+  "name": "Example Stack",
+  "tasks": [
+    {
+      "id": "static-site",
+      "name": "Static site",
+      "command": "python3 -m http.server 8000",
+      "cwd": "~/Sites",
+      "port": 8000,
+      "url": "http://localhost:8000"
+    },
+    {
+      "id": "system-logs",
+      "name": "System logs",
+      "command": "tail -f /var/log/system.log",
+      "cwd": "~"
+    },
+    {
+      "id": "ngrok",
+      "name": "ngrok tunnel",
+      "command": "ngrok http 3000",
+      "cwd": "~",
+      "folder": "Tools",
+      "url": "http://localhost:4040"
+    },
+    {
+      "id": "web-dev",
+      "name": "Web dev server",
+      "command": "npm run dev",
+      "cwd": "~/projects/web",
+      "folder": "Frontend",
+      "port": 3000,
+      "url": "http://localhost:3000"
+    },
+    {
+      "id": "admin-dev",
+      "name": "Admin dev server",
+      "command": "npm run dev",
+      "cwd": "~/projects/admin",
+      "folder": "Frontend",
+      "port": 3001,
+      "url": "http://localhost:3001"
+    },
+    {
+      "id": "api-server",
+      "name": "API server",
+      "command": "npm run start",
+      "cwd": "~/projects/api",
+      "folder": "Backend",
+      "port": 4000,
+      "url": "http://localhost:4000"
+    },
+    {
+      "id": "redis",
+      "name": "Redis",
+      "command": "redis-server",
+      "cwd": "~",
+      "folder": "Backend",
+      "port": 6379
+    },
+    {
+      "id": "claude-web",
+      "name": "Claude (web)",
+      "kind": "claude",
+      "command": "claude",
+      "cwd": "~/projects/web",
+      "folder": "Frontend"
+    },
+    {
+      "id": "claude-api",
+      "name": "Claude (api)",
+      "kind": "claude",
+      "command": "claude",
+      "cwd": "~/projects/api",
+      "folder": "Backend"
+    }
+  ]
+}
