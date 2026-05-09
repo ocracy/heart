@@ -44,21 +44,38 @@ second bundle, get a second folder. Each project stays scoped.
 
 ```json
 {
-  "name": "Maatrics",
+  "name": "My Project",
   "tasks": [
-    { "id": "laravel", "name": "Laravel Serve", "command": "php artisan serve",
-      "cwd": "~/projects/maatrics/api", "port": 8000,
-      "url": "http://localhost:8000" },
-    { "id": "frontend", "name": "Frontend", "command": "npm run dev",
-      "cwd": "~/projects/maatrics/web", "folder": "Frontend",
-      "url": "http://localhost:5173" }
+    {
+      "id": "api",
+      "name": "API",
+      "command": "php artisan serve",
+      "cwd": "~/projects/my-project/api",
+      "port": 8000,
+      "url": "http://localhost:8000"
+    },
+    {
+      "id": "web",
+      "name": "Web",
+      "command": "npm run dev",
+      "cwd": "~/projects/my-project/web",
+      "folder": "Frontend",
+      "port": 5173,
+      "url": "http://localhost:5173"
+    }
   ]
 }
 ```
 
-Nested folders via slash: `"folder": "Backend/Workers"` → `Maatrics/Backend/Workers`.
+Nested folders via slash: `"folder": "Backend/Workers"` → `My Project/Backend/Workers`.
 The legacy bare-array shape is still accepted (the file just lacks a
 top-level name → Heart prompts for one).
+
+> 💡 **Generate this file automatically.** Use the bundled
+> [`heart-json-generator.md`](heart-json-generator.md) as a Claude Code
+> skill — Claude scans your repo, detects every backend / frontend / queue
+> service, infers ports, and writes a ready-to-import `heart.json` (with
+> Claude shortcuts pre-wired for each package directory).
 
 ### ✨ Claude Code support — multi-session shortcuts
 
@@ -66,9 +83,13 @@ Tag a task with `"kind": "claude"` and Heart treats it as an agent shortcut,
 not a service:
 
 ```json
-{ "id": "claude-frontend", "kind": "claude",
-  "command": "claude", "cwd": "~/projects/maatrics/web",
-  "name": "Claude Frontend" }
+{
+  "id": "claude-web",
+  "name": "Claude (web)",
+  "command": "claude",
+  "cwd": "~/projects/my-project/web",
+  "kind": "claude"
+}
 ```
 
 Click the shortcut and you get a multi-session detail pane:
@@ -206,7 +227,7 @@ Two accepted shapes:
 ```jsonc
 // Bundle (preferred — auto-imports under "name", no prompt):
 {
-  "name": "Maatrics",
+  "name": "My Project",
   "tasks": [ /* DevTask[] */ ]
 }
 
