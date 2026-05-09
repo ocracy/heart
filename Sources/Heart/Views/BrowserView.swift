@@ -7,9 +7,11 @@ import WebKit
 /// clamps the viewport to 390pt centered. "Open in Chrome" hands the current URL to the
 /// system Chrome.app (or default browser if Chrome isn't installed).
 struct BrowserView: View {
+    let url: String
     @StateObject private var model: BrowserModel
 
     init(url: String) {
+        self.url = url
         _model = StateObject(wrappedValue: BrowserModel(initialURL: url))
     }
 
@@ -18,6 +20,11 @@ struct BrowserView: View {
             toolbar
             Divider()
             webArea
+        }
+        // Task edited → new URL prop → navigate the existing WKWebView instead of
+        // tearing it down. Keeps cookies, history, scroll position; just swaps the page.
+        .onChange(of: url) { newURL in
+            model.navigate(newURL)
         }
     }
 
