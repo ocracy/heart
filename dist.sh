@@ -1,6 +1,8 @@
 #!/bin/bash
-# Builds a universal (arm64 + x86_64) Heart.app and zips it for distribution.
-# Output: Heart.zip — runs on Apple Silicon AND Intel Macs.
+# Builds Heart.app and zips it for distribution.
+# Output: Heart.zip — Apple Silicon (arm64). Intel users can build from source.
+# (SwiftTerm pulls in a Metal renderer; cross-arch release builds need the Metal
+#  toolchain, which is heavyweight to install for the small Intel audience left.)
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -12,12 +14,12 @@ echo "→ Generating app icon…"
 swift scripts/make-icon.swift
 iconutil -c icns AppIcon.iconset -o AppIcon.icns
 
-echo "→ Building universal binary (arm64 + x86_64)…"
-swift build -c release --arch arm64 --arch x86_64
+echo "→ Building release binary (arm64)…"
+swift build -c release --arch arm64
 
-BIN_PATH=".build/apple/Products/Release/${APP_NAME}"
+BIN_PATH=".build/arm64-apple-macosx/release/${APP_NAME}"
 if [ ! -f "${BIN_PATH}" ]; then
-  echo "✗ Universal build output not found at ${BIN_PATH}"
+  echo "✗ Build output not found at ${BIN_PATH}"
   exit 1
 fi
 
@@ -87,7 +89,8 @@ ALTERNATIVE (without Terminal):
 OPTIONAL: drag tasks.example.json into Heart's sidebar to import
 a sample dev-server config as a folder.
 
-Requires macOS 13+. Universal binary (Apple Silicon + Intel).
+Requires macOS 13+. Apple Silicon (arm64). Intel Mac users — build from source:
+  git clone https://github.com/ocracy/heart.git && cd heart && ./install.sh
 TXT
 
 echo "→ Creating Heart.zip…"
