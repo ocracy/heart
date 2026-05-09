@@ -26,6 +26,15 @@ struct HeartApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var processManager: ProcessManager?
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Force regular UI-app activation explicitly so that running the
+        // executable directly (`swift run Heart`) brings the window to the
+        // foreground. In a packaged .app bundle the Info.plist already gets
+        // us this for free, so the calls are harmless duplicates there.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
