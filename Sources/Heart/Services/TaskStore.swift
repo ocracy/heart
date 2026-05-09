@@ -25,8 +25,13 @@ final class FolderNode {
 
 final class TaskStore: ObservableObject {
     @Published var tasks: [DevTask] = []
+    /// folder name → absolute path of the heart.json that imported it.
+    /// Used to power the folder's right-click "Save" so the user doesn't have
+    /// to re-pick the destination file every time.
+    @Published var bundleSources: [String: String] = [:]
 
     private let fileURL: URL
+    private let sourcesURL: URL
 
     init() {
         let fm = FileManager.default
@@ -36,6 +41,7 @@ final class TaskStore: ObservableObject {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         self.fileURL = dir.appendingPathComponent("tasks.json")
+        self.sourcesURL = dir.appendingPathComponent("sources.json")
 
         // One-time migration: if Heart's tasks.json doesn't exist yet but the legacy
         // Stoker config does, copy it over so users keep their setup after the rename.
@@ -49,6 +55,7 @@ final class TaskStore: ObservableObject {
         }
 
         load()
+        loadSources()
     }
 
     func load() {
@@ -59,6 +66,37 @@ final class TaskStore: ObservableObject {
             self.tasks = Self.defaults
             save()
         }
+    }
+
+    private func loadSources() {
+        guard let data = try? Data(contentsOf: sourcesURL),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return
+        }
+        self.bundleSources = decoded
+    }
+
+    private func saveSources() {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(bundleSources) {
+            try? data.write(to: sourcesURL, options: .atomic)
+        }
+    }
+
+    /// Remember which file a folder was imported from (used for "Save" overwrite).
+    func setBundleSource(folder: String, path: String) {
+        bundleSources[folder] = path
+        saveSources()
+    }
+
+    func bundleSource(forFolder folder: String) -> String? {
+        bundleSources[folder]
+    }
+
+    func clearBundleSource(forFolder folder: String) {
+        bundleSources.removeValue(forKey: folder)
+        saveSources()
     }
 
     func save() {
@@ -136,6 +174,11 @@ final class TaskStore: ObservableObject {
         tasks.removeAll { task in
             guard let folder = task.folder else { return false }
             return folder == path || folder.hasPrefix(prefix)
+        }
+        // Also drop any remembered source path so a fresh import of a different
+        // file with the same name doesn't accidentally save back to the old one.
+        if bundleSources.removeValue(forKey: path) != nil {
+            saveSources()
         }
         save()
     }

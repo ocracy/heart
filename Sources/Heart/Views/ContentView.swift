@@ -367,11 +367,84 @@ struct ContentView: View {
             }
             .disabled(allTasks.isEmpty)
             Divider()
+            if let sourcePath = store.bundleSource(forFolder: node.path) {
+                Button {
+                    saveBundle(folderPath: node.path, to: sourcePath)
+                } label: {
+                    Label("Save to \((sourcePath as NSString).lastPathComponent)",
+                          systemImage: "square.and.arrow.down")
+                }
+            }
+            Button {
+                exportBundle(folderPath: node.path)
+            } label: {
+                Label("Export…", systemImage: "square.and.arrow.up")
+            }
+            .disabled(allTasks.isEmpty)
+            Divider()
             Button(role: .destructive) {
                 deleteFolder(path: node.path)
             } label: {
                 Label("Delete folder (\(totalCount) tasks)", systemImage: "trash")
             }
+        }
+    }
+
+    /// Build a TaskBundle from a folder by stripping the folder prefix off each
+    /// task's `folder` value — so a task imported into "polymarket/Frontend"
+    /// round-trips back to `folder: "Frontend"` (relative to the bundle's name).
+    private func bundle(forFolder folderPath: String) -> TaskBundle {
+        let tasks = store.tasksUnder(path: folderPath)
+        let prefix = folderPath + "/"
+        let stripped = tasks.map { task -> DevTask in
+            var t = task
+            if let folder = t.folder {
+                if folder == folderPath {
+                    t.folder = nil
+                } else if folder.hasPrefix(prefix) {
+                    t.folder = String(folder.dropFirst(prefix.count))
+                }
+            }
+            return t
+        }
+        return TaskBundle(name: folderPath, tasks: stripped)
+    }
+
+    private func writeBundle(_ bundle: TaskBundle, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(bundle)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func saveBundle(folderPath: String, to filePath: String) {
+        let url = URL(fileURLWithPath: filePath)
+        let bundleData = bundle(forFolder: folderPath)
+        do {
+            try writeBundle(bundleData, to: url)
+        } catch {
+            importError = "Couldn't save \(url.lastPathComponent): \(error.localizedDescription)"
+        }
+    }
+
+    private func exportBundle(folderPath: String) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "heart.json"
+        panel.canCreateDirectories = true
+        panel.message = "Export this folder as a Heart bundle"
+        // Default to the previously-known path's directory if we have one.
+        if let known = store.bundleSource(forFolder: folderPath) {
+            panel.directoryURL = URL(fileURLWithPath: known).deletingLastPathComponent()
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let bundleData = bundle(forFolder: folderPath)
+        do {
+            try writeBundle(bundleData, to: url)
+            // Remember the new destination so the next "Save" lands here.
+            store.setBundleSource(folder: folderPath, path: url.path)
+        } catch {
+            importError = "Couldn't export: \(error.localizedDescription)"
         }
     }
 
@@ -569,6 +642,9 @@ struct ContentView: View {
                 store.removeFolder(path: bundleName)
             }
             store.append(cleaned, folder: bundleName)
+            // Remember where this bundle came from so the folder's "Save"
+            // context menu writes back to the same file later.
+            store.setBundleSource(folder: bundleName, path: url.path)
             // Drop the user out of the welcome screen / dangling selection straight
             // into the freshly-imported folder.
             if needSelectionFix {
