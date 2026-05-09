@@ -79,11 +79,14 @@ For each `package.json`:
 
 ### Claude Code shortcuts
 
-For an "agent fan-out" experience, append shortcuts:
-- One at the project **root** → `Claude (root)`.
-- One per top-level service directory you registered (`api`, `web`, `mobile`, …) → `Claude (api)`, `Claude (web)`, etc.
+Only register a Claude shortcut for a directory that **already contains a
+`CLAUDE.md`** file. `CLAUDE.md` is project-specific guidance that Claude
+Code reads on launch, so its presence is the strongest signal that the
+user actually runs `claude` from that directory.
 
-Each shortcut:
+Walk the project and, for every directory at any depth that contains a
+`CLAUDE.md`, emit one Claude shortcut:
+
 ```json
 {
   "id": "claude-<slug>",
@@ -94,7 +97,16 @@ Each shortcut:
 }
 ```
 
-Place them under the same `folder` as the corresponding service when you used folders, otherwise leave folderless.
+Slug rules:
+- Project root → `claude-root`, name `Claude (root)`.
+- Sub-directory → `claude-<dir-slug>` (e.g. `apps/web/CLAUDE.md` → `claude-web`).
+
+Place each shortcut under the same `folder` as the corresponding service
+when you used folders, otherwise leave folderless.
+
+**If no `CLAUDE.md` exists anywhere in the tree, do not emit any Claude
+shortcuts.** Heart users can still spawn Claude sessions ad hoc; the goal
+of this skill is to surface the ones the project explicitly opted into.
 
 ## Naming + IDs
 
@@ -123,13 +135,15 @@ For a project at `~/projects/my-shop`:
 
 ```
 my-shop/
+├── CLAUDE.md               ← root has Claude Code guidance
 ├── api/                    Laravel
 │   ├── composer.json
 │   └── artisan
 ├── web/                    Vite + React
+│   ├── CLAUDE.md           ← web has component-specific guidance
 │   └── package.json
 └── admin/                  Next.js
-    └── package.json
+    └── package.json        ← no CLAUDE.md → no Claude shortcut
 ```
 
 Output `~/projects/my-shop/heart.json`:
@@ -173,14 +187,6 @@ Output `~/projects/my-shop/heart.json`:
       "kind": "claude"
     },
     {
-      "id": "claude-api",
-      "name": "Claude (api)",
-      "command": "claude",
-      "cwd": "~/projects/my-shop/api",
-      "folder": "Backend",
-      "kind": "claude"
-    },
-    {
       "id": "claude-web",
       "name": "Claude (web)",
       "command": "claude",
@@ -191,6 +197,10 @@ Output `~/projects/my-shop/heart.json`:
   ]
 }
 ```
+
+Note: only `claude-root` and `claude-web` were emitted because those are
+the only directories with `CLAUDE.md`. `api/` and `admin/` get no
+shortcut even though they're real services.
 
 ## Installing this skill (for users who want to reuse it across projects)
 

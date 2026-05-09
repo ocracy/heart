@@ -1,15 +1,12 @@
 # Heart
 
-> One window. Every dev process. A real terminal. A built-in browser. And
-> Claude sessions on tap. Native macOS, ~5 MB, no Electron.
+> Run your whole stack from one window.
+> Native macOS, ~5 MB, no Electron.
 
-**Heart** is a SwiftUI launcher for the local dev workflow you already have.
-Define your stack in a JSON file, drop it into the sidebar, and your Laravel
-server, three Vite frontends, ngrok tunnel, queue worker, and a fleet of
-`claude` shells all live side by side in a single window. Click a task to
-see its terminal. Click again to flip to the live preview. Hit a Claude
-shortcut to spawn another agent in that directory — keep two, three, five
-of them open in parallel.
+**Heart** is a single-window launcher for every service your project needs
+— frontend, backend, workers, daemons. Start, stop, and watch them
+without opening a terminal or juggling tabs. Your project stays tidy,
+your focus stays on the code.
 
 <p align="center">
   <img src="docs/demo.gif" width="780" alt="Heart demo">
@@ -21,16 +18,19 @@ of them open in parallel.
 
 ---
 
-## Why Heart?
+## Quick start
 
-Modern projects need a Laravel API, a few frontend dev servers, an ngrok
-tunnel, a worker, plus a couple of `claude` sessions to ask questions and
-run agents. That's six terminal tabs and six browser windows, and you spend
-half the day finding which is which.
+1. **Install Heart** — download
+   [`Heart.zip`](https://github.com/ocracy/heart/releases/latest) → unzip →
+   drag `Heart.app` into `/Applications` → run
+   `xattr -cr /Applications/Heart.app && open -a Heart`.
+2. **Generate your config** — open your project, run `claude`, and ask:
+   > Generate `heart.json` for this project using the rules at
+   > https://github.com/ocracy/heart/blob/main/heart-json-generator.md
+3. **Import** — drag the generated `heart.json` onto Heart's sidebar.
+   Every service appears under your project's folder, ready to start.
 
-Heart collapses all of that into **one window**. One sidebar of tasks, one
-detail pane that shows you exactly what you need: a terminal, an in-app
-browser, or a stack of parallel Claude conversations.
+That's it. One window, your whole stack.
 
 ---
 

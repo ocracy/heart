@@ -521,17 +521,93 @@ struct ContentView: View {
                 regularDetail(task: task, id: id)
             }
         } else {
-            VStack(spacing: 12) {
-                Image(systemName: "terminal")
-                    .font(.system(size: 48))
-                    .foregroundStyle(.secondary)
-                Text("Select a task")
-                    .font(.title3)
-                Text("Pick a task from the sidebar to view its output.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            emptyStatePlaceholder
+        }
+    }
+
+    /// Shown when nothing is selected — doubles as a quick-start guide for new users
+    /// (drag-drop a heart.json, or generate one with the Claude Code skill).
+    @ViewBuilder
+    private var emptyStatePlaceholder: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 40, weight: .light))
+                .foregroundStyle(Color.purple)
+            Text("Welcome to Heart")
+                .font(.title.bold())
+            Text("Run your whole stack from one window.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 14) {
+                quickStartRow(number: 1,
+                              title: "Open your project",
+                              detail: "Run `claude` in your project directory.")
+                quickStartRow(number: 2,
+                              title: "Generate heart.json",
+                              detail: "Ask Claude:",
+                              code: "Generate heart.json by using https://github.com/ocracy/heart/blob/main/heart-json-generator.md")
+                quickStartRow(number: 3,
+                              title: "Drop it here",
+                              detail: "Drag the generated heart.json onto Heart's sidebar.")
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(20)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.secondary.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.secondary.opacity(0.15), lineWidth: 0.5)
+            )
+            .frame(maxWidth: 560)
+
+            Link(destination: URL(string: "https://github.com/ocracy/heart")!) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up.right.square")
+                    Text("Documentation")
+                }
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func quickStartRow(number: Int,
+                               title: String,
+                               detail: String,
+                               code: String? = nil) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.15))
+                Text("\(number)")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                if let code {
+                    Text(code)
+                        .font(.system(size: 11, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(Color.secondary.opacity(0.12))
+                        )
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 
