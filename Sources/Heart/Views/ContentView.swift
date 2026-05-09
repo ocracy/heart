@@ -31,6 +31,7 @@ struct ContentView: View {
     @State private var isDropTargeted = false
     @State private var pendingImport: PendingImport?
     @State private var editingTask: DevTask?
+    @State private var importError: String?
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var activeTabs: [String: DetailTab] = [:]
 
@@ -110,6 +111,17 @@ struct ContentView: View {
                 selectedTaskId = store.tasks.first?.id
             }
         }
+        .alert("Import failed",
+               isPresented: Binding(
+                get: { importError != nil },
+                set: { if !$0 { importError = nil } }
+               ),
+               actions: {
+                   Button("OK") { importError = nil }
+               },
+               message: {
+                   Text(importError ?? "")
+               })
     }
 
     private func toggleSidebar() {
@@ -455,22 +467,51 @@ struct ContentView: View {
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
-        let typeId = UTType.fileURL.identifier
-        guard provider.hasItemConformingToTypeIdentifier(typeId) else { return false }
-        provider.loadDataRepresentation(forTypeIdentifier: typeId) { data, _ in
-            guard let data,
-                  let url = URL(dataRepresentation: data, relativeTo: nil, isAbsolute: true) else { return }
+        let fileType = UTType.fileURL.identifier
+        guard provider.hasItemConformingToTypeIdentifier(fileType) else { return false }
+
+        // `loadItem` accepts every shape the system might hand us — Data, NSURL,
+        // String — whereas `loadDataRepresentation` was silently failing for some
+        // Finder drops on macOS 14+.
+        provider.loadItem(forTypeIdentifier: fileType, options: nil) { item, error in
+            let resolved: URL? = {
+                if let data = item as? Data {
+                    return URL(dataRepresentation: data, relativeTo: nil, isAbsolute: true)
+                }
+                if let url = item as? URL { return url }
+                if let nsurl = item as? NSURL { return nsurl as URL }
+                if let path = item as? String { return URL(fileURLWithPath: path) }
+                return nil
+            }()
             DispatchQueue.main.async {
-                presentImport(for: url)
+                if let url = resolved {
+                    presentImport(for: url)
+                } else if let error {
+                    importError = "Couldn't read the dropped file: \(error.localizedDescription)"
+                } else {
+                    importError = "Couldn't read the dropped file (unknown content type)."
+                }
             }
         }
         return true
     }
 
     private func presentImport(for url: URL) {
-        guard let data = try? Data(contentsOf: url) else { return }
+        // Some sandboxing scenarios hand us a security-scoped URL — start access
+        // before reading and stop after we're done.
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            importError = "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)"
+            return
+        }
+
         // Two accepted shapes:
-        //   { "name": "Maatrics", "tasks": [...] }   ← preferred — auto-imports under "name"
+        //   { "name": "MyProject", "tasks": [...] }   ← preferred — auto-imports under "name"
         //   [ {...}, {...} ]                          ← legacy bare array — falls through to prompt
         let bundle: TaskBundle
         if let parsed = try? JSONDecoder().decode(TaskBundle.self, from: data) {
@@ -478,6 +519,12 @@ struct ContentView: View {
         } else if let arr = try? JSONDecoder().decode([DevTask].self, from: data) {
             bundle = TaskBundle(name: nil, tasks: arr)
         } else {
+            // Surface the actual decoding error so users know what's wrong.
+            do {
+                _ = try JSONDecoder().decode(TaskBundle.self, from: data)
+            } catch {
+                importError = "Couldn't parse \(url.lastPathComponent) as a Heart bundle: \(error.localizedDescription)"
+            }
             return
         }
 
@@ -492,7 +539,10 @@ struct ContentView: View {
         let cleaned = normalized.filter {
             !$0.command.trimmingCharacters(in: .whitespaces).isEmpty
         }
-        guard !cleaned.isEmpty else { return }
+        guard !cleaned.isEmpty else {
+            importError = "\(url.lastPathComponent) had no tasks with a `command`."
+            return
+        }
 
         // Bundle has a name → auto-import everything (Claude + regular) under that folder. No prompt.
         if let bundleName = bundle.name?.trimmingCharacters(in: .whitespacesAndNewlines),
