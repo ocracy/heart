@@ -542,11 +542,11 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                 quickStartRow(number: 1,
                               title: "Open your project",
-                              detail: "Run `claude` in your project directory.")
+                              detail: "cd into the project and run `claude`.")
                 quickStartRow(number: 2,
                               title: "Generate heart.json",
-                              detail: "Ask Claude:",
-                              code: "Generate heart.json by using https://github.com/ocracy/heart/blob/main/heart-json-generator.md")
+                              detail: "Paste this prompt into Claude:",
+                              code: "Read https://raw.githubusercontent.com/ocracy/heart/refs/heads/main/heart-json-generator.md and generate heart.json for this project following that format.")
                 quickStartRow(number: 3,
                               title: "Drop it here",
                               detail: "Drag the generated heart.json onto Heart's sidebar.")

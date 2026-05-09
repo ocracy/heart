@@ -20,17 +20,37 @@ your focus stays on the code.
 
 ## Quick start
 
-1. **Install Heart** — download
-   [`Heart.zip`](https://github.com/ocracy/heart/releases/latest) → unzip →
-   drag `Heart.app` into `/Applications` → run
-   `xattr -cr /Applications/Heart.app && open -a Heart`.
-2. **Generate your config** — open your project, run `claude`, and ask:
-   > Generate `heart.json` for this project using the rules at
-   > https://github.com/ocracy/heart/blob/main/heart-json-generator.md
-3. **Import** — drag the generated `heart.json` onto Heart's sidebar.
-   Every service appears under your project's folder, ready to start.
+**1. Install Heart** — download
+[`Heart.zip`](https://github.com/ocracy/heart/releases/latest), unzip,
+drag `Heart.app` into `/Applications`, then in Terminal:
+
+```bash
+xattr -cr /Applications/Heart.app && open -a Heart
+```
+
+**2. Generate `heart.json` for your project** — `cd` into your project,
+run `claude`, and paste:
+
+> Read https://raw.githubusercontent.com/ocracy/heart/refs/heads/main/heart-json-generator.md
+> and generate `heart.json` for this project following that format.
+
+Claude fetches the spec, walks your codebase, infers ports, and writes
+a ready-to-import `heart.json` at the project root (with Claude
+shortcuts for every directory that has a `CLAUDE.md`).
+
+**3. Import** — drag the generated `heart.json` onto Heart's sidebar.
+Every service lands under your project's folder, ready to start.
 
 That's it. One window, your whole stack.
+
+> 💡 **Power-user shortcut.** Install the spec as a Claude Code skill
+> once, and skip the URL after that:
+> ```bash
+> mkdir -p ~/.claude/skills/heart-json-generator && \
+>   curl -fsSL https://raw.githubusercontent.com/ocracy/heart/main/heart-json-generator.md \
+>   -o ~/.claude/skills/heart-json-generator/SKILL.md
+> ```
+> Then in any project just say: *"use the heart-json-generator skill"*.
 
 ---
 
