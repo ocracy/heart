@@ -34,6 +34,26 @@ struct DevTask: Codable, Identifiable, Equatable, Hashable {
     }
 
     var isClaudeShortcut: Bool { kind == "claude" }
+
+    // Resilient decoder — every non-essential field gets a sensible default when
+    // missing from the JSON, so hand-written / generated heart.json files don't
+    // need to spell out `autoStart: false` everywhere just to satisfy Codable.
+    enum CodingKeys: String, CodingKey {
+        case id, name, command, cwd, port, url, autoStart, folder, kind
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        self.command = try c.decodeIfPresent(String.self, forKey: .command) ?? ""
+        self.cwd = try c.decodeIfPresent(String.self, forKey: .cwd) ?? ""
+        self.port = try c.decodeIfPresent(Int.self, forKey: .port)
+        self.url = try c.decodeIfPresent(String.self, forKey: .url)
+        self.autoStart = try c.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
+        self.folder = try c.decodeIfPresent(String.self, forKey: .folder)
+        self.kind = try c.decodeIfPresent(String.self, forKey: .kind)
+    }
 }
 
 /// Importable JSON shape: `{ "name": "Maatrics", "tasks": [...] }`. The legacy bare-array
