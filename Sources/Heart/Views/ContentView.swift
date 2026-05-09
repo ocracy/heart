@@ -814,9 +814,20 @@ struct ContentView: View {
         importToast = "Imported \(resolved.tasks.count) task\(resolved.tasks.count == 1 ? "" : "s") into '\(folder)'"
     }
 
+    /// Pick the id we should actually render the detail pane against.
+    /// Falls back to `lastValidTaskId` when the live selection points at a
+    /// folder header so the detail view doesn't flash to the welcome screen
+    /// for the single runloop tick before the bounce-back fires.
+    private var resolvedTaskId: String? {
+        if let id = selectedTaskId, store.tasks.contains(where: { $0.id == id }) {
+            return id
+        }
+        return lastValidTaskId
+    }
+
     @ViewBuilder
     private var detail: some View {
-        if let id = selectedTaskId, let task = store.tasks.first(where: { $0.id == id }) {
+        if let id = resolvedTaskId, let task = store.tasks.first(where: { $0.id == id }) {
             if task.isClaudeShortcut {
                 ClaudeDetailView(task: task, processManager: processManager)
                     .id("claude-\(id)")
