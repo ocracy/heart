@@ -88,6 +88,7 @@ struct ContentView: View {
                 onCancel: { pendingImport = nil },
                 onConfirm: { folder in
                     store.append(pending.tasks, folder: folder)
+                    processManager.scanForExternalServices(store.tasksUnder(path: folder))
                     pendingImport = nil
                 }
             )
@@ -110,6 +111,10 @@ struct ContentView: View {
             if selectedTaskId == nil {
                 selectedTaskId = store.tasks.first?.id
             }
+            // First-pass scan: anything with a port already bound by some other
+            // process (redis on :6379, postgres, a leftover dev server) shows up
+            // as running so the dot is green from the start.
+            processManager.scanForExternalServices(store.tasks)
         }
         .alert("Import failed",
                isPresented: Binding(
@@ -570,6 +575,8 @@ struct ContentView: View {
                 selectedTaskId = store.tasksUnder(path: bundleName).first?.id
                     ?? store.tasks.first?.id
             }
+            // Light up rows whose port is already bound by some other process.
+            processManager.scanForExternalServices(store.tasksUnder(path: bundleName))
             return
         }
 

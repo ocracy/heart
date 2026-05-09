@@ -106,24 +106,41 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
     }
 
     /// Graceful stop: SIGINT (like Ctrl+C) → 3s SIGTERM → 3s SIGKILL.
+    /// For tasks Heart didn't spawn (foreign services detected via
+    /// `scanForExternalServices`), fall back to `killPort` so the user can still
+    /// take a port back even though Heart isn't holding the process handle.
     func stop(_ task: DevTask) {
-        guard let view = terminalViews[task.id], view.process.running else { return }
-        statuses[task.id] = .stopping
-        let pid = view.process.shellPid
+        if let view = terminalViews[task.id], view.process.running {
+            statuses[task.id] = .stopping
+            let pid = view.process.shellPid
 
-        // PTY line discipline: writing 0x03 to master delivers SIGINT to the foreground process group.
-        view.process.send(data: ArraySlice([0x03]))
+            // PTY line discipline: writing 0x03 to master delivers SIGINT to the foreground process group.
+            view.process.send(data: ArraySlice([0x03]))
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self,
-                  let v = self.terminalViews[task.id],
-                  v.process.running else { return }
-            kill(pid, SIGTERM)
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
                 guard let self,
                       let v = self.terminalViews[task.id],
                       v.process.running else { return }
-                kill(pid, SIGKILL)
+                kill(pid, SIGTERM)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                    guard let self,
+                          let v = self.terminalViews[task.id],
+                          v.process.running else { return }
+                    kill(pid, SIGKILL)
+                }
+            }
+            return
+        }
+
+        // External service — Heart didn't spawn it but the UI shows it as running
+        // because the port is bound. Free the port and reflect the new state.
+        if statuses[task.id] == .running, let port = task.port, Self.isPortBound(port) {
+            statuses[task.id] = .stopping
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.killPort(port, for: task.id)
+                DispatchQueue.main.async {
+                    self?.statuses[task.id] = .stopped
+                }
             }
         }
     }
@@ -172,6 +189,26 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         guard let view = terminalViews[taskId] else { return }
         // RIS (\u001Bc) — full reset: clears screen, scrollback, modes, charset.
         view.feed(text: "\u{1B}c")
+    }
+
+    /// Scan tasks with a `port` and flag them as `.running` if the port is already
+    /// bound by some other process — e.g. `redis-server` started outside Heart.
+    /// Existing statuses (running tasks Heart manages, in-flight starts/stops) are
+    /// left alone; only `.stopped` / unset entries get flipped.
+    func scanForExternalServices(_ tasks: [DevTask]) {
+        for task in tasks {
+            guard let port = task.port else { continue }
+            // Don't override Heart-managed processes or in-flight states.
+            if let view = terminalViews[task.id], view.process.running { continue }
+            switch statuses[task.id] {
+            case .none, .stopped:
+                if Self.isPortBound(port) {
+                    statuses[task.id] = .running
+                }
+            default:
+                break
+            }
+        }
     }
 
     /// Hard-kill any running process for this id and drop the cached terminal view.
