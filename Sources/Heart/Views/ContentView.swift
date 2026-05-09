@@ -26,6 +26,9 @@ struct ContentView: View {
     @ObservedObject var processManager: ProcessManager
 
     @State private var selectedTaskId: String?
+    /// Last selectedTaskId we know matched a real task. Used to bounce back when
+    /// macOS List selection lands on a folder header — see `.onChange(of:)` below.
+    @State private var lastValidTaskId: String?
     @State private var showSettings = false
     @State private var collapsedFolders: Set<String> = []
     @State private var isDropTargeted = false
@@ -127,6 +130,7 @@ struct ContentView: View {
             if selectedTaskId == nil {
                 selectedTaskId = store.tasks.first?.id
             }
+            lastValidTaskId = selectedTaskId
             processManager.scanForExternalServices(store.tasks)
         }
         .onChange(of: selectedTaskId) { newId in
@@ -134,6 +138,22 @@ struct ContentView: View {
                   newId ?? "nil",
                   "\(sidebarHidden)",
                   store.tasks.count)
+            // Folder rows in the sidebar's `ForEach(root.subfolders, id: \.path)`
+            // are also selectable as far as `List(selection:)` is concerned —
+            // clicking one writes the folder *path* (e.g. "polymarket/Frontend")
+            // into selectedTaskId, which is then nil-resolved by the detail view
+            // and shows the welcome screen. Bounce back to the previous real
+            // task so folder headers feel inert (like Finder's disclosure rows).
+            guard let newId else { return }
+            if store.tasks.contains(where: { $0.id == newId }) {
+                lastValidTaskId = newId
+            } else {
+                NSLog("[Heart] selection landed on non-task '%@' — reverting to %@",
+                      newId, lastValidTaskId ?? "nil")
+                DispatchQueue.main.async {
+                    selectedTaskId = lastValidTaskId
+                }
+            }
         }
         .onChange(of: sidebarHidden) { newValue in
             NSLog("[Heart] sidebarHidden → %@", "\(newValue)")
