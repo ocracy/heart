@@ -1052,13 +1052,19 @@ struct ContentView: View {
                             availableTabs: [DetailTab],
                             active: DetailTab) -> some View {
         let id = task.id
-        let isRunning = processManager.status(id).isRunning
+        let status = processManager.status(id)
         ZStack {
             // Terminal layer — always rendered so the persistent SwiftTerm view stays mounted
             // (preserves cursor / scrollback / TUI state across tab switches).
             ZStack {
                 OutputView(terminalView: processManager.terminalView(for: id))
-                if !isRunning {
+                // Three overlay states:
+                //   - stopped / crashed → Activate / Restart prompt
+                //   - externalRunning   → "another process is bound" + Run in Heart
+                //   - running / starting / stopping → no overlay (terminal visible)
+                if status == .externalRunning {
+                    externalRunningOverlay(task: task)
+                } else if !status.isOwnedByHeart {
                     activateOverlay(task: task)
                 }
             }
@@ -1073,6 +1079,75 @@ struct ContentView: View {
                     .allowsHitTesting(active == .browser)
             }
         }
+    }
+
+    /// Shown when a TCP port is bound by a process Heart didn't spawn.
+    /// We can't see its stdout (different PTY), so explain that and offer to
+    /// reclaim the port + start a Heart-owned instance.
+    @ViewBuilder
+    private func externalRunningOverlay(task: DevTask) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(Color(red: 0.4, green: 0.8, blue: 0.4))
+
+            VStack(spacing: 4) {
+                Text("Already running outside Heart")
+                    .font(.title3.bold())
+                if let port = task.port {
+                    Text(verbatim: "Port :\(port) is bound by another process, so Heart can't show its output here.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 30)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    if let port = task.port {
+                        processManager.killPort(port, for: task.id)
+                    }
+                    // Re-spawn after a short delay so the port has time to free up.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        processManager.start(task)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                        Text("Run in Heart").fontWeight(.semibold)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                if let port = task.port {
+                    Button {
+                        processManager.killPort(port, for: task.id)
+                        // Status will fall to .stopped once the readiness probe
+                        // sees the port free; we set it eagerly so the UI
+                        // doesn't lag.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            processManager.statuses[task.id] = .stopped
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "bolt.slash")
+                            Text(verbatim: "Free :\(port)")
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.ultraThinMaterial)
     }
 
     @ViewBuilder

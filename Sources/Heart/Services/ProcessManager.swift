@@ -134,7 +134,9 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
 
         // External service — Heart didn't spawn it but the UI shows it as running
         // because the port is bound. Free the port and reflect the new state.
-        if statuses[task.id] == .running, let port = task.port, Self.isPortBound(port) {
+        if statuses[task.id] == .externalRunning,
+           let port = task.port,
+           Self.isPortBound(port) {
             statuses[task.id] = .stopping
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.killPort(port, for: task.id)
@@ -191,19 +193,21 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         view.feed(text: "\u{1B}c")
     }
 
-    /// Scan tasks with a `port` and flag them as `.running` if the port is already
-    /// bound by some other process — e.g. `redis-server` started outside Heart.
-    /// Existing statuses (running tasks Heart manages, in-flight starts/stops) are
-    /// left alone; only `.stopped` / unset entries get flipped.
+    /// Scan tasks with a `port` and flag them as `.externalRunning` if the port
+    /// is already bound by a process Heart didn't spawn — e.g. `redis-server`
+    /// started outside Heart. Existing statuses (Heart-owned running tasks,
+    /// in-flight transitions) are left alone; only `.stopped` / unset entries
+    /// get flipped. The distinct `.externalRunning` state lets the detail view
+    /// explain why the terminal is empty (we don't own the PTY) and offer a
+    /// "Run in Heart" handoff.
     func scanForExternalServices(_ tasks: [DevTask]) {
         for task in tasks {
             guard let port = task.port else { continue }
-            // Don't override Heart-managed processes or in-flight states.
             if let view = terminalViews[task.id], view.process.running { continue }
             switch statuses[task.id] {
             case .none, .stopped:
                 if Self.isPortBound(port) {
-                    statuses[task.id] = .running
+                    statuses[task.id] = .externalRunning
                 }
             default:
                 break
