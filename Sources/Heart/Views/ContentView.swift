@@ -833,6 +833,13 @@ struct ContentView: View {
                     .id("claude-\(id)")
             } else {
                 regularDetail(task: task, id: id)
+                    // Fresh container identity per task — guarantees OutputView's
+                    // makeNSView runs again on every task switch, which re-mounts
+                    // the per-task SwiftTerm view and re-issues `refresh()` so the
+                    // existing buffer is redrawn (the previous "selection change
+                    // shows the last terminal" bug came from reusing the same
+                    // NSView container across tasks).
+                    .id("regular-\(id)")
             }
         } else {
             emptyStatePlaceholder
