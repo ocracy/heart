@@ -7,12 +7,25 @@ struct SettingsView: View {
 
     @State private var jsonText: String = ""
     @State private var errorMessage: String?
+    @State private var showFormatHelp = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 10) {
                 Text("Tasks (JSON)")
                     .font(.title2.bold())
+                Button {
+                    showFormatHelp = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "questionmark.circle")
+                        Text("Format help")
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Show heart.json schema reference")
                 Spacer()
                 Text(store.configPath)
                     .font(.system(size: 10, design: .monospaced))
@@ -63,6 +76,9 @@ struct SettingsView: View {
         .frame(minWidth: 760, minHeight: 540)
         .onAppear {
             jsonText = encode(store.tasks)
+        }
+        .sheet(isPresented: $showFormatHelp) {
+            JSONFormatHelp(onClose: { showFormatHelp = false })
         }
     }
 

@@ -25,78 +25,62 @@ struct ContentView: View {
     @ObservedObject var store: TaskStore
     @ObservedObject var processManager: ProcessManager
 
+    @State private var selectedProject: String?
+    /// Per-project memory of the last selected task. Restored when switching tabs.
+    @State private var selectedTaskByProject: [String: String] = [:]
     @State private var selectedTaskId: String?
     /// Last selectedTaskId we know matched a real task. Used to bounce back when
     /// macOS List selection lands on a folder header — see `.onChange(of:)` below.
     @State private var lastValidTaskId: String?
     @State private var showSettings = false
     @State private var collapsedFolders: Set<String> = []
-    @State private var isDropTargeted = false
     @State private var pendingImport: PendingImport?
+    @State private var pendingReplace: PendingReplace?
+    @State private var renameTarget: RenameRequest?
     @State private var editingTask: DevTask?
     @State private var importError: String?
     @State private var importToast: String?
-    /// We pin the underlying NavigationSplitView visibility to `.all` and instead
-    /// drive the "hide sidebar" feature ourselves via a conditional layout —
-    /// macOS auto-collapses the column on selection / window changes when we
-    /// hand SwiftUI a binding it can write to, even with the previous
-    /// no-op-setter trick.
     @State private var sidebarHidden: Bool = false
     @State private var activeTabs: [String: DetailTab] = [:]
+    /// Pending project to delete (with confirm dialog).
+    @State private var deleteProjectTarget: String?
+    @State private var showFormatHelp = false
 
     var body: some View {
-        Group {
-            if sidebarHidden {
-                detail
-            } else {
-                NavigationSplitView(columnVisibility: .constant(.all)) {
-                    sidebar
-                } detail: {
-                    detail
-                }
-                .navigationSplitViewStyle(.balanced)
-                .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
+        VStack(spacing: 0) {
+            if !store.orderedProjects.isEmpty {
+                ProjectTabBar(
+                    projects: store.orderedProjects,
+                    selection: $selectedProject,
+                    runningCounts: runningCountsByProject,
+                    sources: store.bundleSources,
+                    onSelect: { switchToProject($0) },
+                    onPickFile: { pickAndImport(into: nil) },
+                    onCreateEmpty: createEmptyProject,
+                    onShowFormatHelp: { showFormatHelp = true },
+                    onDropNewProject: { urls in handleDroppedURLs(urls, into: nil) },
+                    onReorder: { store.reorderProjects($0) },
+                    onRename: { renameTarget = RenameRequest(currentName: $0) },
+                    onSave: { saveProject($0) },
+                    onSaveAs: { saveProjectAs($0) },
+                    onUnlinkSource: { store.unlinkSource(project: $0) },
+                    onExport: { exportBundle(folderPath: $0) },
+                    onStartAll: { processManager.startAll(store.tasksUnder(project: $0)) },
+                    onStopAll: { processManager.stopAll(store.tasksUnder(project: $0)) },
+                    onRestartAll: { project in
+                        for task in store.tasksUnder(project: project) {
+                            processManager.restart(task)
+                        }
+                    },
+                    onDelete: { deleteProjectTarget = $0 }
+                )
             }
+            mainPane
         }
-        .toolbar {
-            ToolbarItemGroup {
-                Button {
-                    toggleSidebar()
-                } label: {
-                    Label("Toggle Sidebar", systemImage: "sidebar.left")
-                }
-                .keyboardShortcut("s", modifiers: [.command, .control])
-                .help("Toggle sidebar (⌃⌘S)")
-
-                Button {
-                    processManager.startAll(store.tasks)
-                } label: {
-                    Label("Start All", systemImage: "play.circle.fill")
-                }
-                .help("Start every task")
-                .disabled(!hasStartable(store.tasks))
-
-                Button {
-                    processManager.stopAll(store.tasks)
-                } label: {
-                    Label("Stop All", systemImage: "stop.circle.fill")
-                }
-                .help("Stop every task")
-                .disabled(!hasStoppable(store.tasks))
-
-                Spacer()
-
-                Button {
-                    showSettings = true
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                .keyboardShortcut(",", modifiers: .command)
-                .help("Edit tasks")
-            }
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsView(store: store)
+        .toolbar { toolbarItems }
+        .sheet(isPresented: $showSettings) { SettingsView(store: store) }
+        .sheet(isPresented: $showFormatHelp) {
+            JSONFormatHelp(onClose: { showFormatHelp = false })
         }
         .sheet(item: $pendingImport) { pending in
             ImportFolderPrompt(
@@ -104,9 +88,29 @@ struct ContentView: View {
                 onCancel: { pendingImport = nil },
                 onConfirm: { folder in
                     store.append(pending.tasks, folder: folder)
+                    if let source = pending.sourcePath {
+                        store.setBundleSource(folder: folder, path: source)
+                    }
                     processManager.scanForExternalServices(store.tasksUnder(path: folder))
                     importToast = "Imported \(pending.tasks.count) task\(pending.tasks.count == 1 ? "" : "s") into '\(folder)'"
                     pendingImport = nil
+                    switchToProject(folder)
+                }
+            )
+        }
+        .sheet(item: $renameTarget) { req in
+            RenameProjectPrompt(
+                currentName: req.currentName,
+                onCancel: { renameTarget = nil },
+                onConfirm: { newName in
+                    let finalName = store.renameProject(req.currentName, to: newName)
+                    if selectedProject == req.currentName {
+                        selectedProject = finalName
+                    }
+                    if let taskId = selectedTaskByProject.removeValue(forKey: req.currentName) {
+                        selectedTaskByProject[finalName] = taskId
+                    }
+                    renameTarget = nil
                 }
             )
         }
@@ -124,54 +128,93 @@ struct ContentView: View {
                 }
             )
         }
-        .onAppear {
-            NSLog("[Heart] ContentView onAppear — %d task(s), selectedTaskId=%@",
-                  store.tasks.count, selectedTaskId ?? "nil")
-            if selectedTaskId == nil {
-                selectedTaskId = store.tasks.first?.id
+        .alert(
+            "Replace tasks?",
+            isPresented: Binding(
+                get: { pendingReplace != nil },
+                set: { if !$0 { pendingReplace = nil } }
+            ),
+            presenting: pendingReplace
+        ) { req in
+            Button("Cancel", role: .cancel) { pendingReplace = nil }
+            Button("Replace", role: .destructive) {
+                if let req = pendingReplace {
+                    performReplace(req)
+                }
+                pendingReplace = nil
             }
-            lastValidTaskId = selectedTaskId
+        } message: { req in
+            Text("Replace tasks of '\(req.project)' with contents of \(req.sourceURL.lastPathComponent)?\nThis will overwrite all tasks in this project.")
+        }
+        .alert(
+            "Delete project?",
+            isPresented: Binding(
+                get: { deleteProjectTarget != nil },
+                set: { if !$0 { deleteProjectTarget = nil } }
+            ),
+            presenting: deleteProjectTarget
+        ) { name in
+            Button("Cancel", role: .cancel) { deleteProjectTarget = nil }
+            Button("Delete", role: .destructive) {
+                if let name = deleteProjectTarget {
+                    performDeleteProject(name)
+                }
+                deleteProjectTarget = nil
+            }
+        } message: { name in
+            let count = store.tasksUnder(project: name).count
+            Text("Delete '\(name)' and \(count) task\(count == 1 ? "" : "s")?")
+        }
+        .onAppear {
+            NSLog("[Heart] ContentView onAppear — %d task(s), %d project(s)",
+                  store.tasks.count, store.orderedProjects.count)
+            if selectedProject == nil {
+                selectedProject = store.orderedProjects.first
+            }
+            if let project = selectedProject {
+                let firstTask = store.tasksUnder(project: project).first?.id
+                selectedTaskId = selectedTaskByProject[project] ?? firstTask
+                lastValidTaskId = selectedTaskId
+            }
             processManager.scanForExternalServices(store.tasks)
         }
         .onChange(of: selectedTaskId) { newId in
-            NSLog("[Heart] selectedTaskId → %@ (sidebarHidden=%@, taskCount=%d)",
-                  newId ?? "nil",
-                  "\(sidebarHidden)",
-                  store.tasks.count)
-            // Folder rows in the sidebar's `ForEach(root.subfolders, id: \.path)`
-            // are also selectable as far as `List(selection:)` is concerned —
-            // clicking one writes the folder *path* (e.g. "polymarket/Frontend")
-            // into selectedTaskId, which is then nil-resolved by the detail view
-            // and shows the welcome screen. Bounce back to the previous real
-            // task so folder headers feel inert (like Finder's disclosure rows).
             guard let newId else { return }
             if store.tasks.contains(where: { $0.id == newId }) {
                 lastValidTaskId = newId
+                if let project = selectedProject {
+                    selectedTaskByProject[project] = newId
+                }
             } else {
-                NSLog("[Heart] selection landed on non-task '%@' — reverting to %@",
-                      newId, lastValidTaskId ?? "nil")
                 DispatchQueue.main.async {
                     selectedTaskId = lastValidTaskId
                 }
             }
         }
-        .onChange(of: sidebarHidden) { newValue in
-            NSLog("[Heart] sidebarHidden → %@", "\(newValue)")
-        }
-        .onChange(of: store.tasks.count) { newCount in
-            NSLog("[Heart] store.tasks.count → %d", newCount)
+        .onChange(of: store.orderedProjects) { projects in
+            // Project deleted (e.g. via Settings JSON edit) — fall back to first.
+            if let cur = selectedProject, !projects.contains(cur) {
+                selectedProject = projects.first
+                if let p = selectedProject {
+                    selectedTaskId = selectedTaskByProject[p]
+                        ?? store.tasksUnder(project: p).first?.id
+                } else {
+                    selectedTaskId = nil
+                }
+            }
+            // If we just lost all projects, recreate the default so the UI is never empty.
+            if projects.isEmpty {
+                let name = store.createEmptyProject(suggestedName: TaskStore.defaultProjectName)
+                selectedProject = name
+            }
         }
         .alert("Import failed",
                isPresented: Binding(
                 get: { importError != nil },
                 set: { if !$0 { importError = nil } }
                ),
-               actions: {
-                   Button("OK") { importError = nil }
-               },
-               message: {
-                   Text(importError ?? "")
-               })
+               actions: { Button("OK") { importError = nil } },
+               message: { Text(importError ?? "") })
         .overlay(alignment: .top) {
             if let toast = importToast {
                 Text(toast)
@@ -179,17 +222,13 @@ struct ContentView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(
-                        Capsule().fill(Color.green.opacity(0.85))
-                    )
+                    .background(Capsule().fill(Color.green.opacity(0.85)))
                     .padding(.top, 12)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: importToast)
         .onChange(of: importToast) { newValue in
-            // Auto-dismiss after 3 s. Capture the current value so a second toast
-            // arriving in the meantime doesn't get erased early.
             guard let value = newValue else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                 if importToast == value { importToast = nil }
@@ -197,8 +236,121 @@ struct ContentView: View {
         }
     }
 
-    private func toggleSidebar() {
-        sidebarHidden.toggle()
+    @ToolbarContentBuilder
+    private var toolbarItems: some ToolbarContent {
+        ToolbarItemGroup {
+            Button { toggleSidebar() } label: {
+                Label("Toggle Sidebar", systemImage: "sidebar.left")
+            }
+            .keyboardShortcut("s", modifiers: [.command, .control])
+            .help("Toggle sidebar (⌃⌘S)")
+
+            Button {
+                if let project = selectedProject {
+                    processManager.startAll(store.tasksUnder(project: project))
+                }
+            } label: {
+                Label("Start All", systemImage: "play.circle.fill")
+            }
+            .help("Start every task in the current project")
+            .disabled(!hasStartable(currentProjectTasks))
+
+            Button {
+                if let project = selectedProject {
+                    processManager.stopAll(store.tasksUnder(project: project))
+                }
+            } label: {
+                Label("Stop All", systemImage: "stop.circle.fill")
+            }
+            .help("Stop every task in the current project")
+            .disabled(!hasStoppable(currentProjectTasks))
+
+            Spacer()
+
+            Button { showSettings = true } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .keyboardShortcut(",", modifiers: .command)
+            .help("Edit tasks")
+        }
+    }
+
+    @ViewBuilder
+    private var mainPane: some View {
+        if let project = selectedProject, store.orderedProjects.contains(project) {
+            Group {
+                if sidebarHidden {
+                    detail
+                } else {
+                    NavigationSplitView(columnVisibility: .constant(.all)) {
+                        ProjectSidebar(
+                            store: store,
+                            processManager: processManager,
+                            project: project,
+                            selectedTaskId: $selectedTaskId,
+                            collapsedFolders: $collapsedFolders,
+                            onEdit: { editingTask = $0 },
+                            onDelete: { deleteTask($0) },
+                            onDuplicate: { duplicateTask($0) },
+                            onOpenClaudeHere: { openClaudeHere(for: $0) },
+                            onShowBrowser: { showBrowser(for: $0) },
+                            onSaveBundle: { folderPath, filePath in
+                                saveBundle(folderPath: folderPath, to: filePath)
+                            },
+                            onExportBundle: { exportBundle(folderPath: $0) },
+                            onDeleteFolder: { deleteFolder(path: $0) },
+                            onDropReplace: { urls in handleDroppedURLs(urls, into: project) },
+                            onPickImport: { pickAndImport(into: project) },
+                            onAddTask: { addBlankTask(to: project) }
+                        )
+                    } detail: {
+                        detail
+                    }
+                    .navigationSplitViewStyle(.balanced)
+                    .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
+                }
+            }
+        } else {
+            welcomePlaceholder
+        }
+    }
+
+    private var currentProjectTasks: [DevTask] {
+        guard let project = selectedProject else { return [] }
+        return store.tasksUnder(project: project)
+    }
+
+    /// (running, total) per top-level project — fed to ProjectTabBar for the badge.
+    private var runningCountsByProject: [String: (Int, Int)] {
+        var result: [String: (Int, Int)] = [:]
+        for project in store.orderedProjects {
+            let tasks = store.tasksUnder(project: project)
+            let running = tasks.filter { processManager.status($0.id).isRunning }.count
+            result[project] = (running, tasks.count)
+        }
+        return result
+    }
+
+    private func toggleSidebar() { sidebarHidden.toggle() }
+
+    private func switchToProject(_ project: String) {
+        if let prev = selectedProject, prev != project, let id = selectedTaskId {
+            selectedTaskByProject[prev] = id
+        }
+        selectedProject = project
+        let firstTask = store.tasksUnder(project: project).first?.id
+        if let saved = selectedTaskByProject[project],
+           store.tasks.contains(where: { $0.id == saved }) {
+            selectedTaskId = saved
+        } else {
+            selectedTaskId = firstTask
+        }
+        lastValidTaskId = selectedTaskId
+    }
+
+    private func createEmptyProject() {
+        let name = store.createEmptyProject()
+        switchToProject(name)
     }
 
     private func showBrowser(for task: DevTask) {
@@ -210,8 +362,6 @@ struct ContentView: View {
 
     // MARK: - tab management
 
-    /// Tabs available for a regular (non-Claude) task. Fixed by task config — Browser only
-    /// shows up when a URL is set. Tabs are not closeable; switching is the only interaction.
     private func tabs(for task: DevTask) -> [DetailTab] {
         task.url == nil ? [.terminal] : [.terminal, .browser]
     }
@@ -226,245 +376,8 @@ struct ContentView: View {
         activeTabs[taskId] = tab
     }
 
-    private var sidebar: some View {
-        VStack(spacing: 0) {
-            List(selection: $selectedTaskId) {
-                let root = store.buildTree()
-                ForEach(root.tasks) { task in
-                    sidebarRow(task: task)
-                }
-                ForEach(root.subfolders, id: \.path) { node in
-                    folderTree(node: node, depth: 0)
-                }
-            }
-            .listStyle(.sidebar)
+    // MARK: - Bundle save / export / replace
 
-            DropZoneView(isTargeted: isDropTargeted)
-                .padding(8)
-                .onTapGesture {
-                    pickAndImport()
-                }
-        }
-        // Use the modern Transferable-based API — earlier `onDrop` +
-        // `provider.loadItem` was racy: the async callback occasionally fired
-        // after SwiftUI invalidated the view, dropping the file silently.
-        .dropDestination(for: URL.self) { urls, _ in
-            handleDroppedURLs(urls)
-        } isTargeted: { targeted in
-            isDropTargeted = targeted
-        }
-        // Big in-your-face overlay while a file is being dragged — the dashed
-        // footer hint is too easy to miss when the task list scrolls past it.
-        .overlay {
-            if isDropTargeted {
-                ZStack {
-                    Color.accentColor.opacity(0.08)
-                    VStack(spacing: 10) {
-                        Image(systemName: "tray.and.arrow.down.fill")
-                            .font(.system(size: 36, weight: .light))
-                        Text("Drop heart.json to import")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text("Existing folder of the same name is refreshed.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                    .foregroundStyle(Color.accentColor)
-                    .padding(20)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(.ultraThinMaterial)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.accentColor.opacity(0.5),
-                                    style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
-                    )
-                }
-                .allowsHitTesting(false)
-            }
-        }
-    }
-
-    /// Picks the right row style for a task — Claude shortcuts get a sparkles row that
-    /// hides start/stop buttons (multi-session, opened by tapping); everything else uses TaskRow.
-    @ViewBuilder
-    private func sidebarRow(task: DevTask) -> some View {
-        if task.isClaudeShortcut {
-            ClaudeShortcutRow(task: task, isSelected: selectedTaskId == task.id) {
-                selectedTaskId = task.id
-            }
-            .tag(task.id)
-            .contextMenu { claudeRowMenu(for: task) }
-        } else {
-            TaskRow(task: task,
-                    processManager: processManager,
-                    onShowBrowser: { showBrowser(for: task) })
-                .tag(task.id)
-                .contextMenu { rowMenu(for: task) }
-        }
-    }
-
-    @ViewBuilder
-    private func claudeRowMenu(for task: DevTask) -> some View {
-        Button {
-            editingTask = task
-        } label: {
-            Label("Edit…", systemImage: "pencil")
-        }
-        Button {
-            duplicateTask(task)
-        } label: {
-            Label("Duplicate", systemImage: "plus.square.on.square")
-        }
-        Divider()
-        Button(role: .destructive) {
-            deleteTask(task)
-        } label: {
-            Label("Delete", systemImage: "trash")
-        }
-    }
-
-    private func pickAndImport() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.json]
-        panel.message = "Select a tasks.json file to import as a folder"
-        if panel.runModal() == .OK, let url = panel.url {
-            presentImport(for: url)
-        }
-    }
-
-    private func folderTree(node: FolderNode, depth: Int) -> AnyView {
-        let isCollapsed = collapsedFolders.contains(node.path)
-        let allTasks = node.allTasks()
-        let runningCount = allTasks.filter { processManager.status($0.id).isRunning }.count
-
-        return AnyView(
-            Group {
-                folderHeader(node: node,
-                             depth: depth,
-                             isCollapsed: isCollapsed,
-                             runningCount: runningCount,
-                             totalCount: allTasks.count,
-                             allTasks: allTasks)
-                if !isCollapsed {
-                    ForEach(node.tasks) { task in
-                        sidebarRow(task: task)
-                            .padding(.leading, CGFloat((depth + 1) * 14))
-                    }
-                    ForEach(node.subfolders, id: \.path) { sub in
-                        folderTree(node: sub, depth: depth + 1)
-                    }
-                }
-            }
-        )
-    }
-
-    @ViewBuilder
-    private func folderHeader(node: FolderNode,
-                              depth: Int,
-                              isCollapsed: Bool,
-                              runningCount: Int,
-                              totalCount: Int,
-                              allTasks: [DevTask]) -> some View {
-        HStack(spacing: 12) {
-            // List rows in macOS swallow .onTapGesture when the row also carries
-            // a .contextMenu and a tag — the gesture conflicts with the row's
-            // selection handling, which is why "click folder → collapse, click
-            // again → nothing happens" was reproducible. A Button doesn't fight
-            // the row recognizer the same way.
-            Button {
-                NSLog("[Heart] folder toggle: %@ (isCollapsed=%@ → %@)",
-                      node.path,
-                      "\(isCollapsed)",
-                      "\(!isCollapsed)")
-                if collapsedFolders.contains(node.path) {
-                    collapsedFolders.remove(node.path)
-                } else {
-                    collapsedFolders.insert(node.path)
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 10)
-                    Image(systemName: "folder.fill")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tint)
-                    Text(node.name)
-                        .font(.system(size: 11, weight: .semibold))
-                        .textCase(.uppercase)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Text(verbatim: "(\(runningCount)/\(totalCount))")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(runningCount > 0 ? Color.green : Color.secondary.opacity(0.6))
-                    Spacer(minLength: 0)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            HStack(spacing: 6) {
-                folderIconButton(systemName: "play.fill", tint: .green, help: "Start all tasks in folder", enabled: hasStartable(allTasks)) {
-                    processManager.startAll(allTasks)
-                }
-                folderIconButton(systemName: "stop.fill", tint: .red, help: "Stop all tasks in folder", enabled: hasStoppable(allTasks)) {
-                    processManager.stopAll(allTasks)
-                }
-                folderIconButton(systemName: "arrow.clockwise", tint: .secondary, help: "Restart all tasks in folder", enabled: !allTasks.isEmpty) {
-                    for task in allTasks { processManager.restart(task) }
-                }
-            }
-            .fixedSize()
-        }
-        .padding(.vertical, 4)
-        .padding(.leading, CGFloat(depth * 14))
-        .padding(.trailing, 6)
-        .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
-        .contextMenu {
-            Button { processManager.startAll(allTasks) } label: {
-                Label("Start all", systemImage: "play.fill")
-            }
-            .disabled(!hasStartable(allTasks))
-            Button { processManager.stopAll(allTasks) } label: {
-                Label("Stop all", systemImage: "stop.fill")
-            }
-            .disabled(!hasStoppable(allTasks))
-            Button { for task in allTasks { processManager.restart(task) } } label: {
-                Label("Restart all", systemImage: "arrow.clockwise")
-            }
-            .disabled(allTasks.isEmpty)
-            Divider()
-            if let sourcePath = store.bundleSource(forFolder: node.path) {
-                Button {
-                    saveBundle(folderPath: node.path, to: sourcePath)
-                } label: {
-                    Label("Save to \((sourcePath as NSString).lastPathComponent)",
-                          systemImage: "square.and.arrow.down")
-                }
-            }
-            Button {
-                exportBundle(folderPath: node.path)
-            } label: {
-                Label("Export…", systemImage: "square.and.arrow.up")
-            }
-            .disabled(allTasks.isEmpty)
-            Divider()
-            Button(role: .destructive) {
-                deleteFolder(path: node.path)
-            } label: {
-                Label("Delete folder (\(totalCount) tasks)", systemImage: "trash")
-            }
-        }
-    }
-
-    /// Build a TaskBundle from a folder by stripping the folder prefix off each
-    /// task's `folder` value — so a task imported into "polymarket/Frontend"
-    /// round-trips back to `folder: "Frontend"` (relative to the bundle's name).
     private func bundle(forFolder folderPath: String) -> TaskBundle {
         let tasks = store.tasksUnder(path: folderPath)
         let prefix = folderPath + "/"
@@ -494,8 +407,38 @@ struct ContentView: View {
         let bundleData = bundle(forFolder: folderPath)
         do {
             try writeBundle(bundleData, to: url)
+            importToast = "Saved to \(url.lastPathComponent)"
         } catch {
             importError = "Couldn't save \(url.lastPathComponent): \(error.localizedDescription)"
+        }
+    }
+
+    private func saveProject(_ project: String) {
+        guard let path = store.bundleSource(forFolder: project) else {
+            saveProjectAs(project)
+            return
+        }
+        saveBundle(folderPath: project, to: path)
+    }
+
+    private func saveProjectAs(_ project: String) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "heart.json"
+        panel.canCreateDirectories = true
+        panel.message = "Save '\(project)' as a Heart bundle"
+        if let known = store.bundleSource(forFolder: project) {
+            panel.directoryURL = URL(fileURLWithPath: known).deletingLastPathComponent()
+            panel.nameFieldStringValue = (known as NSString).lastPathComponent
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let bundleData = bundle(forFolder: project)
+        do {
+            try writeBundle(bundleData, to: url)
+            store.setBundleSource(folder: project, path: url.path)
+            importToast = "Saved to \(url.lastPathComponent)"
+        } catch {
+            importError = "Couldn't save: \(error.localizedDescription)"
         }
     }
 
@@ -505,7 +448,6 @@ struct ContentView: View {
         panel.nameFieldStringValue = "heart.json"
         panel.canCreateDirectories = true
         panel.message = "Export this folder as a Heart bundle"
-        // Default to the previously-known path's directory if we have one.
         if let known = store.bundleSource(forFolder: folderPath) {
             panel.directoryURL = URL(fileURLWithPath: known).deletingLastPathComponent()
         }
@@ -513,88 +455,21 @@ struct ContentView: View {
         let bundleData = bundle(forFolder: folderPath)
         do {
             try writeBundle(bundleData, to: url)
-            // Remember the new destination so the next "Save" lands here.
             store.setBundleSource(folder: folderPath, path: url.path)
+            importToast = "Exported to \(url.lastPathComponent)"
         } catch {
             importError = "Couldn't export: \(error.localizedDescription)"
         }
     }
 
-    @ViewBuilder
-    private func folderIconButton(systemName: String,
-                                  tint: Color,
-                                  help: String,
-                                  enabled: Bool = true,
-                                  action: @escaping () -> Void) -> some View {
-        let activeTint = enabled ? tint : Color.secondary.opacity(0.5)
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(activeTint)
-                .frame(width: 24, height: 24)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(activeTint.opacity(0.12))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5)
-                        .stroke(activeTint.opacity(0.25), lineWidth: 0.5)
-                )
-        }
-        .buttonStyle(.plain)
-        .help(help)
-        .disabled(!enabled)
-        .opacity(enabled ? 1.0 : 0.55)
-    }
-
-    /// True when at least one task is not currently alive — i.e. clicking "start" would do something.
-    /// Treats `.starting` as already-alive so we don't re-fire start on a task that's already coming up.
     private func hasStartable(_ tasks: [DevTask]) -> Bool {
         tasks.contains { !processManager.status($0.id).isRunning }
     }
-
-    /// True when at least one task is currently alive (running / starting / stopping) and could be stopped.
     private func hasStoppable(_ tasks: [DevTask]) -> Bool {
         tasks.contains { processManager.status($0.id).isRunning }
     }
 
-    @ViewBuilder
-    private func rowMenu(for task: DevTask) -> some View {
-        let isRunning = processManager.status(task.id).isRunning
-        Button {
-            processManager.toggle(task)
-        } label: {
-            Label(isRunning ? "Stop" : "Start",
-                  systemImage: isRunning ? "stop.fill" : "play.fill")
-        }
-        Button {
-            processManager.restart(task)
-        } label: {
-            Label("Restart", systemImage: "arrow.clockwise")
-        }
-        Divider()
-        Button {
-            editingTask = task
-        } label: {
-            Label("Edit…", systemImage: "pencil")
-        }
-        Button {
-            duplicateTask(task)
-        } label: {
-            Label("Duplicate", systemImage: "plus.square.on.square")
-        }
-        Button {
-            openClaudeHere(for: task)
-        } label: {
-            Label("Open Claude Here", systemImage: "sparkles")
-        }
-        Divider()
-        Button(role: .destructive) {
-            deleteTask(task)
-        } label: {
-            Label("Delete", systemImage: "trash")
-        }
-    }
+    // MARK: - Task helpers
 
     private func duplicateTask(_ task: DevTask) {
         let copy = DevTask(
@@ -628,12 +503,25 @@ struct ContentView: View {
         processManager.start(claudeTask)
     }
 
+    private func addBlankTask(to project: String) {
+        let blank = DevTask(
+            id: UUID().uuidString,
+            name: "",
+            command: "",
+            cwd: NSHomeDirectory(),
+            folder: project
+        )
+        editingTask = blank
+    }
+
     private func deleteTask(_ task: DevTask) {
         if processManager.status(task.id).isRunning {
             processManager.stop(task)
         }
         if selectedTaskId == task.id {
-            selectedTaskId = store.tasks.first(where: { $0.id != task.id })?.id
+            let project = selectedProject
+            let projectTasks = project.map { store.tasksUnder(project: $0) } ?? []
+            selectedTaskId = projectTasks.first(where: { $0.id != task.id })?.id
         }
         store.remove(id: task.id)
     }
@@ -645,20 +533,55 @@ struct ContentView: View {
         }
         let removeIds = Set(toRemove.map(\.id))
         if let sel = selectedTaskId, removeIds.contains(sel) {
-            selectedTaskId = store.tasks.first(where: { !removeIds.contains($0.id) })?.id
+            let project = selectedProject
+            let remaining = project
+                .map { store.tasksUnder(project: $0).filter { !removeIds.contains($0.id) } }
+                ?? []
+            selectedTaskId = remaining.first?.id
         }
         store.removeFolder(path: path)
     }
 
+    private func performDeleteProject(_ name: String) {
+        let toRemove = store.tasksUnder(project: name)
+        for task in toRemove where processManager.status(task.id).isRunning {
+            processManager.stop(task)
+        }
+        store.removeFolder(path: name)
+        selectedTaskByProject.removeValue(forKey: name)
+        if selectedProject == name {
+            selectedProject = store.orderedProjects.first
+            if let p = selectedProject {
+                selectedTaskId = selectedTaskByProject[p]
+                    ?? store.tasksUnder(project: p).first?.id
+            } else {
+                selectedTaskId = nil
+            }
+        }
+    }
+
+    private func pickAndImport(into project: String?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.json]
+        panel.message = project.map { "Replace tasks of '\($0)' with contents of a JSON file" }
+            ?? "Select a tasks.json file to import as a project"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if let project {
+            queueReplace(url: url, project: project)
+        } else {
+            presentImport(for: url)
+        }
+    }
 
     // MARK: - Import pipeline
 
-    /// Outcome of parsing a heart.json off disk — either a fully-resolved bundle
-    /// (auto-import under `folder`) or one that needs the user to name a folder.
     private struct ResolvedBundle {
-        var folder: String?            // nil → ask the user for a folder name
+        var folder: String?
         var tasks: [DevTask]
-        var sourcePath: String         // remembered for "Save" later
+        var sourcePath: String
         var suggestedFolderName: String
         var displayFileName: String
     }
@@ -680,39 +603,60 @@ struct ContentView: View {
         }
     }
 
-    /// Drop callback. Runs synchronously on the main actor — see dropDestination.
-    private func handleDroppedURLs(_ urls: [URL]) -> Bool {
-        NSLog("[Heart] drop received: %d url(s) — %@",
-              urls.count,
-              urls.map(\.path).joined(separator: ", "))
+    /// Drop callback. `into` = the project the drop landed on (sidebar drop), or
+    /// nil if it landed on the tab bar / welcome screen (new-project drop).
+    @discardableResult
+    private func handleDroppedURLs(_ urls: [URL], into project: String?) -> Bool {
         guard let url = urls.first else {
             importError = "Drop didn't contain a file URL."
             return false
         }
-        presentImport(for: url)
+        if let project {
+            queueReplace(url: url, project: project)
+        } else {
+            presentImport(for: url)
+        }
         return true
     }
 
-    private func presentImport(for url: URL) {
-        NSLog("[Heart] presentImport: %@", url.path)
+    private func queueReplace(url: URL, project: String) {
         do {
             let resolved = try parseImport(at: url)
-            NSLog("[Heart] parsed bundle '%@' (%d task(s))",
-                  resolved.folder ?? "<unnamed>", resolved.tasks.count)
-            applyImport(resolved)
-            NSLog("[Heart] applyImport done — store now has %d task(s)", store.tasks.count)
+            pendingReplace = PendingReplace(
+                project: project,
+                tasks: resolved.tasks,
+                sourceURL: URL(fileURLWithPath: resolved.sourcePath)
+            )
         } catch let failure as ImportFailure {
-            NSLog("[Heart] import failed: %@", failure.errorDescription ?? "unknown")
             importError = failure.errorDescription
         } catch {
-            NSLog("[Heart] import failed (other): %@", "\(error)")
             importError = "Import failed: \(error.localizedDescription)"
         }
     }
 
-    /// Read + decode + normalize, no store mutations. Throws `ImportFailure`.
+    private func performReplace(_ req: PendingReplace) {
+        // Stop any running tasks in the target project before replacing.
+        for task in store.tasksUnder(project: req.project) where processManager.status(task.id).isRunning {
+            processManager.stop(task)
+        }
+        store.replaceProject(req.project, with: req.tasks, source: req.sourceURL)
+        processManager.scanForExternalServices(store.tasksUnder(project: req.project))
+        importToast = "Replaced '\(req.project)' with \(req.tasks.count) task\(req.tasks.count == 1 ? "" : "s")"
+        switchToProject(req.project)
+    }
+
+    private func presentImport(for url: URL) {
+        do {
+            let resolved = try parseImport(at: url)
+            applyImport(resolved)
+        } catch let failure as ImportFailure {
+            importError = failure.errorDescription
+        } catch {
+            importError = "Import failed: \(error.localizedDescription)"
+        }
+    }
+
     private func parseImport(at url: URL) throws -> ResolvedBundle {
-        // Sandboxed Finder URLs need scoped access before reading.
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
 
@@ -758,8 +702,6 @@ struct ContentView: View {
         )
     }
 
-    /// Try the bundle shape first, fall back to a bare DevTask array. Both shapes
-    /// failing → re-decode as a bundle to surface the most useful error message.
     private func decodeBundle(data: Data, fileName: String) throws -> TaskBundle {
         if let parsed = try? JSONDecoder().decode(TaskBundle.self, from: data) {
             return parsed
@@ -774,15 +716,13 @@ struct ContentView: View {
         }
     }
 
-    /// Mutate the store + select / scan / report. Pure side effects; safe to call
-    /// only after `parseImport` succeeded.
     private func applyImport(_ resolved: ResolvedBundle) {
         guard let folder = resolved.folder else {
-            // Bundle had no top-level name → ask user where to put the tasks.
             pendingImport = PendingImport(
                 tasks: resolved.tasks,
                 suggestedName: resolved.suggestedFolderName,
-                sourceFile: resolved.displayFileName
+                sourceFile: resolved.displayFileName,
+                sourcePath: resolved.sourcePath
             )
             return
         }
@@ -790,10 +730,6 @@ struct ContentView: View {
         // Refresh-on-collision: same folder name = user updated their config and
         // re-dropped. Replace the contents instead of suffixing duplicates.
         let existing = store.tasksUnder(path: folder)
-        let selectionWasInsideFolder = selectedTaskId.map {
-            Set(existing.map(\.id)).contains($0)
-        } ?? false
-
         if !existing.isEmpty {
             for task in existing where processManager.status(task.id).isRunning {
                 processManager.stop(task)
@@ -803,21 +739,13 @@ struct ContentView: View {
         store.append(resolved.tasks, folder: folder)
         store.setBundleSource(folder: folder, path: resolved.sourcePath)
 
-        // Auto-select inside the folder if the user was on the welcome screen
-        // or had a now-deleted task selected.
-        if selectedTaskId == nil || selectionWasInsideFolder {
-            selectedTaskId = store.tasksUnder(path: folder).first?.id
-                ?? store.tasks.first?.id
-        }
-
         processManager.scanForExternalServices(store.tasksUnder(path: folder))
         importToast = "Imported \(resolved.tasks.count) task\(resolved.tasks.count == 1 ? "" : "s") into '\(folder)'"
+        switchToProject(folder)
     }
 
-    /// Pick the id we should actually render the detail pane against.
-    /// Falls back to `lastValidTaskId` when the live selection points at a
-    /// folder header so the detail view doesn't flash to the welcome screen
-    /// for the single runloop tick before the bounce-back fires.
+    // MARK: - Detail pane
+
     private var resolvedTaskId: String? {
         if let id = selectedTaskId, store.tasks.contains(where: { $0.id == id }) {
             return id
@@ -833,23 +761,47 @@ struct ContentView: View {
                     .id("claude-\(id)")
             } else {
                 regularDetail(task: task, id: id)
-                    // Fresh container identity per task — guarantees OutputView's
-                    // makeNSView runs again on every task switch, which re-mounts
-                    // the per-task SwiftTerm view and re-issues `refresh()` so the
-                    // existing buffer is redrawn (the previous "selection change
-                    // shows the last terminal" bug came from reusing the same
-                    // NSView container across tasks).
                     .id("regular-\(id)")
             }
         } else {
-            emptyStatePlaceholder
+            emptyProjectPlaceholder
         }
     }
 
-    /// Shown when nothing is selected — doubles as a quick-start guide for new users
-    /// (drag-drop a heart.json, or generate one with the Claude Code skill).
     @ViewBuilder
-    private var emptyStatePlaceholder: some View {
+    private var emptyProjectPlaceholder: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "tray")
+                .font(.system(size: 40, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("No task selected")
+                .font(.title3.bold())
+            if let project = selectedProject {
+                if store.tasksUnder(project: project).isEmpty {
+                    Text("'\(project)' has no tasks yet.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Text("Drop a heart.json onto this project to replace it, or add tasks via Settings.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 360)
+                } else {
+                    Text("Pick a task from the sidebar.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Shown when there are no projects at all — pristine first-launch state.
+    /// TaskStore guarantees `defaults` create "Project 1" so we should normally
+    /// never hit this, but we keep it as a safety net.
+    @ViewBuilder
+    private var welcomePlaceholder: some View {
         VStack(spacing: 18) {
             Image(systemName: "sparkles")
                 .font(.system(size: 40, weight: .light))
@@ -860,101 +812,16 @@ struct ContentView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
-            VStack(alignment: .leading, spacing: 14) {
-                quickStartRow(number: 1,
-                              title: "Open your project",
-                              detail: "cd into the project and run `claude`.")
-                quickStartRow(number: 2,
-                              title: "Generate heart.json",
-                              detail: "Paste this prompt into Claude:",
-                              code: "Read https://raw.githubusercontent.com/ocracy/heart/refs/heads/main/heart-json-generator.md and generate heart.json for this project following that format.")
-                quickStartRow(number: 3,
-                              title: "Drop it here",
-                              detail: "Drag the generated heart.json onto Heart's sidebar.")
+            Button {
+                createEmptyProject()
+            } label: {
+                Label("Create your first project", systemImage: "folder.badge.plus")
             }
-            .padding(20)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.secondary.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.secondary.opacity(0.15), lineWidth: 0.5)
-            )
-            .frame(maxWidth: 560)
-
-            Link(destination: URL(string: "https://github.com/ocracy/heart")!) {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.up.right.square")
-                    Text("Documentation")
-                }
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            // Highlight tint while a file is being dragged over the welcome panel.
-            RoundedRectangle(cornerRadius: 0)
-                .fill(isDropTargeted ? Color.accentColor.opacity(0.06) : Color.clear)
-        )
-        .overlay(alignment: .top) {
-            if isDropTargeted {
-                Text("Drop heart.json to import")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule().fill(Color.accentColor.opacity(0.12))
-                    )
-                    .padding(.top, 18)
-            }
-        }
-        // Welcome panel mirrors the sidebar drop target so a brand-new user
-        // doesn't have to aim at the sidebar at all.
-        .dropDestination(for: URL.self) { urls, _ in
-            handleDroppedURLs(urls)
-        } isTargeted: { targeted in
-            isDropTargeted = targeted
-        }
-    }
-
-    @ViewBuilder
-    private func quickStartRow(number: Int,
-                               title: String,
-                               detail: String,
-                               code: String? = nil) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(Color.accentColor.opacity(0.15))
-                Text("\(number)")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Color.accentColor)
-            }
-            .frame(width: 24, height: 24)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                Text(detail)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                if let code {
-                    Text(code)
-                        .font(.system(size: 11, design: .monospaced))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(Color.secondary.opacity(0.12))
-                        )
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
     }
 
     @ViewBuilder
@@ -1016,7 +883,6 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
-            // Tab bar — fixed list, no close/+. Only switches active tab.
             HStack(spacing: 6) {
                 ForEach(availableTabs, id: \.self) { tab in
                     tabPill(tab: tab, isActive: tab == active, taskId: id)
@@ -1061,14 +927,8 @@ struct ContentView: View {
         let id = task.id
         let status = processManager.status(id)
         ZStack {
-            // Terminal layer — always rendered so the persistent SwiftTerm view stays mounted
-            // (preserves cursor / scrollback / TUI state across tab switches).
             ZStack {
                 OutputView(terminalView: processManager.terminalView(for: id))
-                // Three overlay states:
-                //   - stopped / crashed → Activate / Restart prompt
-                //   - externalRunning   → "another process is bound" + Run in Heart
-                //   - running / starting / stopping → no overlay (terminal visible)
                 if status == .externalRunning {
                     externalRunningOverlay(task: task)
                 } else if !status.isOwnedByHeart {
@@ -1078,7 +938,6 @@ struct ContentView: View {
             .opacity(active == .terminal ? 1 : 0)
             .allowsHitTesting(active == .terminal)
 
-            // Browser layer — only present when this task has a URL.
             if availableTabs.contains(.browser), let url = task.url {
                 BrowserView(url: url)
                     .id("browser-\(id)")
@@ -1088,9 +947,6 @@ struct ContentView: View {
         }
     }
 
-    /// Shown when a TCP port is bound by a process Heart didn't spawn.
-    /// We can't see its stdout (different PTY), so explain that and offer to
-    /// reclaim the port + start a Heart-owned instance.
     @ViewBuilder
     private func externalRunningOverlay(task: DevTask) -> some View {
         VStack(spacing: 14) {
@@ -1116,7 +972,6 @@ struct ContentView: View {
                     if let port = task.port {
                         processManager.killPort(port, for: task.id)
                     }
-                    // Re-spawn after a short delay so the port has time to free up.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         processManager.start(task)
                     }
@@ -1134,9 +989,6 @@ struct ContentView: View {
                 if let port = task.port {
                     Button {
                         processManager.killPort(port, for: task.id)
-                        // Status will fall to .stopped once the readiness probe
-                        // sees the port free; we set it eagerly so the UI
-                        // doesn't lag.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             processManager.statuses[task.id] = .stopped
                         }
@@ -1211,6 +1063,8 @@ struct ContentView: View {
     }
 }
 
+// MARK: - EditTaskSheet
+
 struct EditTaskSheet: View {
     let task: DevTask
     let onCancel: () -> Void
@@ -1239,6 +1093,11 @@ struct EditTaskSheet: View {
         _isClaudeShortcut = State(initialValue: task.isClaudeShortcut)
     }
 
+    private var isNewTask: Bool {
+        task.name.trimmingCharacters(in: .whitespaces).isEmpty &&
+        task.command.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -1246,111 +1105,139 @@ struct EditTaskSheet: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    field(label: "Name") {
-                        styledTextField(placeholder: "My dev server", text: $name)
+                VStack(alignment: .leading, spacing: 26) {
+                    section(title: "Essentials", icon: "doc.text") {
+                        field(label: "Name",
+                              hint: "Shown in the sidebar.") {
+                            styledTextField(placeholder: "My dev server", text: $name)
+                        }
+                        field(label: "Project / Folder",
+                              hint: "Top-level segment becomes the tab name. Use \"/\" for sub-folders, e.g. Backend/Workers.") {
+                            styledTextField(placeholder: "Project 1", text: $folder)
+                        }
+                        field(label: "Command",
+                              hint: "Runs in zsh -l -i inside a PTY.") {
+                            styledTextField(placeholder: "npm run dev",
+                                            text: $command,
+                                            monospaced: true)
+                        }
+                        field(label: "Working directory",
+                              hint: "Where the command runs. Tilde (~) expands to your home folder.") {
+                            directoryRow
+                        }
                     }
 
-                    field(label: "Command") {
-                        styledTextField(
-                            placeholder: "npm run dev",
-                            text: $command,
-                            monospaced: true
-                        )
-                    }
-
-                    field(label: "Working directory",
-                          hint: "Where the command runs. Tilde (~) expands to your home folder.") {
-                        directoryRow
-                    }
-
-                    HStack(alignment: .top, spacing: 16) {
+                    section(title: "Network", icon: "network") {
                         field(label: "Port",
-                              hint: "Optional. Enables the KILL PORT button and readiness check.") {
-                            styledTextField(placeholder: "3000", text: $portText, monospaced: true)
-                                .frame(width: 140)
+                              hint: "Optional. Enables the KILL PORT button and a readiness check (status stays Starting until the port binds).") {
+                            styledTextField(placeholder: "3000",
+                                            text: $portText,
+                                            monospaced: true)
                                 .onChange(of: portText) { new in
                                     let filtered = new.filter(\.isNumber)
                                     if filtered != new { portText = filtered }
                                 }
                         }
-
-                        field(label: "Folder",
-                              hint: "Optional. Use “/” for nested folders, e.g. Backend/Workers.") {
-                            styledTextField(placeholder: "Backend", text: $folder)
+                        field(label: "URL",
+                              hint: "Optional. Adds a Browser tab to the detail pane.") {
+                            styledTextField(placeholder: "http://localhost:3000",
+                                            text: $url,
+                                            monospaced: true)
                         }
                     }
 
-                    field(label: "URL",
-                          hint: "Optional. Adds a globe icon to open this URL in the in-app browser.") {
-                        styledTextField(placeholder: "http://localhost:3000",
-                                        text: $url,
-                                        monospaced: true)
-                    }
-
-                    Toggle(isOn: $isClaudeShortcut) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "sparkles")
-                                    .foregroundStyle(Color.purple)
-                                Text("Claude shortcut")
-                                    .font(.system(size: 13, weight: .medium))
+                    section(title: "Behavior", icon: "switch.2") {
+                        Toggle(isOn: $isClaudeShortcut) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "sparkles")
+                                        .foregroundStyle(Color.purple)
+                                    Text("Claude shortcut")
+                                        .font(.system(size: 13, weight: .medium))
+                                }
+                                Text("Pins the task at the top of the sidebar and opens a fresh terminal session each time it's clicked (good for keeping multiple `claude` chats in the same dir).")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
-                            Text("Pins this task at the top of the sidebar and lets you open multiple parallel terminal sessions for it (e.g. several `claude` chats in the same dir).")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
                         }
-                    }
-                    .toggleStyle(.switch)
+                        .toggleStyle(.switch)
 
-                    Toggle(isOn: $autoStart) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Auto-start on launch")
-                                .font(.system(size: 13, weight: .medium))
-                            Text("Reserved — the UI flag is saved but not yet acted upon.")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
+                        Toggle(isOn: $autoStart) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Auto-start on launch")
+                                    .font(.system(size: 13, weight: .medium))
+                                Text("Reserved — the UI flag is saved but not yet acted upon.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
+                        .toggleStyle(.switch)
                     }
-                    .toggleStyle(.switch)
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 22)
+                .padding(.horizontal, 26)
+                .padding(.vertical, 24)
             }
 
             Divider()
 
             footer
         }
-        .frame(width: 560, height: 620)
+        .frame(width: 600, height: 700)
         .background(Color(NSColor.windowBackgroundColor))
     }
 
     // MARK: - sections
+
+    @ViewBuilder
+    private func section<Content: View>(title: String,
+                                        icon: String,
+                                        @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text(title.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.8)
+                    .foregroundStyle(.secondary)
+                Rectangle()
+                    .fill(Color.secondary.opacity(0.15))
+                    .frame(height: 0.5)
+            }
+            VStack(alignment: .leading, spacing: 16) { content() }
+        }
+    }
 
     private var header: some View {
         HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.accentColor.opacity(0.15))
-                Image(systemName: "pencil")
+                Image(systemName: isNewTask ? "plus" : "pencil")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
             }
             .frame(width: 36, height: 36)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Edit task")
+                Text(isNewTask ? "New task" : "Edit task")
                     .font(.system(size: 16, weight: .semibold))
-                Text(verbatim: "id: \(task.id)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                if !isNewTask {
+                    Text(verbatim: "id: \(task.id)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Fill in the essentials and click Save.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 18)
+        .padding(.horizontal, 26)
+        .padding(.vertical, 20)
     }
 
     private var directoryRow: some View {
@@ -1402,12 +1289,12 @@ struct EditTaskSheet: View {
             Spacer()
             Button("Cancel", role: .cancel) { onCancel() }
                 .keyboardShortcut(.cancelAction)
-            Button("Save changes") { commit() }
+            Button(isNewTask ? "Add task" : "Save changes") { commit() }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(!isValid)
         }
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 26)
         .padding(.vertical, 14)
         .background(Color(NSColor.underPageBackgroundColor))
     }
@@ -1502,6 +1389,8 @@ struct EditTaskSheet: View {
     }
 }
 
+// MARK: - DropZoneView
+
 struct DropZoneView: View {
     let isTargeted: Bool
 
@@ -1510,8 +1399,8 @@ struct DropZoneView: View {
             Image(systemName: isTargeted ? "tray.and.arrow.down.fill" : "tray.and.arrow.down")
                 .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
             Text(isTargeted
-                 ? "Drop to import as folder"
-                 : "Drop or click to import a tasks.json as folder")
+                 ? "Drop to replace this project"
+                 : "Drop or click to replace this project")
                 .font(.system(size: 10))
                 .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
         }
@@ -1532,12 +1421,29 @@ struct DropZoneView: View {
     }
 }
 
+// MARK: - PendingImport / PendingReplace / RenameRequest
+
 struct PendingImport: Identifiable {
     let id = UUID()
     let tasks: [DevTask]
     let suggestedName: String
     let sourceFile: String
+    let sourcePath: String?
 }
+
+struct PendingReplace: Identifiable {
+    let id = UUID()
+    let project: String
+    let tasks: [DevTask]
+    let sourceURL: URL
+}
+
+struct RenameRequest: Identifiable {
+    let id = UUID()
+    let currentName: String
+}
+
+// MARK: - Prompts
 
 struct ImportFolderPrompt: View {
     let pending: PendingImport
@@ -1552,16 +1458,16 @@ struct ImportFolderPrompt: View {
                 Image(systemName: "folder.badge.plus")
                     .font(.system(size: 18))
                     .foregroundStyle(.tint)
-                Text("Import as folder")
+                Text("Import as project")
                     .font(.title3.bold())
             }
 
-            Text("Found \(pending.tasks.count) task(s) in \(pending.sourceFile). Group them under a folder name:")
+            Text("Found \(pending.tasks.count) task(s) in \(pending.sourceFile). Name the project:")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            TextField("Folder name", text: $folderName)
+            TextField("Project name", text: $folderName)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit { confirm() }
 
@@ -1579,9 +1485,7 @@ struct ImportFolderPrompt: View {
         }
         .padding(20)
         .frame(width: 420)
-        .onAppear {
-            folderName = pending.suggestedName
-        }
+        .onAppear { folderName = pending.suggestedName }
     }
 
     private func confirm() {
@@ -1591,8 +1495,63 @@ struct ImportFolderPrompt: View {
     }
 }
 
+struct RenameProjectPrompt: View {
+    let currentName: String
+    let onCancel: () -> Void
+    let onConfirm: (String) -> Void
+
+    @State private var newName: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "pencil")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.tint)
+                Text("Rename project")
+                    .font(.title3.bold())
+            }
+
+            Text("Pick a new name for '\(currentName)'. Tasks and source link are preserved.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("Project name", text: $newName)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { confirm() }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Rename") { confirm() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!isValid)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+        .onAppear { newName = currentName }
+    }
+
+    private var isValid: Bool {
+        let trimmed = newName.trimmingCharacters(in: .whitespaces)
+        return !trimmed.isEmpty && trimmed != currentName
+    }
+
+    private func confirm() {
+        let trimmed = newName.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        onConfirm(trimmed)
+    }
+}
+
+// MARK: -
+
 private extension String {
-    /// Returns nil when the string is empty — useful for converting empty form
-    /// fields into truly absent optionals at the boundary.
     func nilIfEmpty() -> String? { isEmpty ? nil : self }
 }
