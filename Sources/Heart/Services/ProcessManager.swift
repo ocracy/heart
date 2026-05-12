@@ -259,6 +259,53 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         return sid
     }
 
+    /// Inputs for `resumeSession`. Value-typed so future additions (continue
+    /// mode, PR-linked resume, custom permission mode, etc.) don't break
+    /// existing call sites.
+    struct ResumeOptions {
+        let sessionId: UUID
+        let forkSession: Bool
+        let displayName: String?
+        let initialPrompt: String?
+    }
+
+    /// Open a new Claude session that resumes an existing conversation by
+    /// UUID. Mirrors `addSession` but the shadow task's command is built via
+    /// `ClaudeSessionService.buildResumeCommand` so flags like `--fork-session`
+    /// and `-n <name>` are escaped safely.
+    @discardableResult
+    func resumeSession(for task: DevTask, options: ResumeOptions) -> String {
+        let shortId = String(options.sessionId.uuidString.prefix(8))
+        // Heart-internal id; dedup if the user resumes the same session twice
+        // in the same task without closing the first instance.
+        var sid = "claude-resume-\(task.id)-\(shortId)"
+        var bump = 2
+        var list = claudeSessions[task.id] ?? []
+        while list.contains(where: { $0.id == sid }) {
+            sid = "claude-resume-\(task.id)-\(shortId)-\(bump)"
+            bump += 1
+        }
+        let trimmedDisplay = options.displayName?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sessionLabel = trimmedDisplay.isEmpty ? "↻ \(shortId)" : trimmedDisplay
+        list.append(ClaudeSession(id: sid, name: sessionLabel))
+        claudeSessions[task.id] = list
+        activeClaudeSession[task.id] = sid
+
+        let command = ClaudeSessionService.buildResumeCommand(
+            sessionId: options.sessionId,
+            forkSession: options.forkSession,
+            displayName: trimmedDisplay.isEmpty ? nil : trimmedDisplay,
+            initialPrompt: options.initialPrompt
+        )
+        let shadow = DevTask(id: sid,
+                             name: task.name,
+                             command: command,
+                             cwd: task.cwd)
+        start(shadow)
+        return sid
+    }
+
     func removeSession(taskId: String, sessionId: String) {
         var list = claudeSessions[taskId] ?? []
         list.removeAll { $0.id == sessionId }

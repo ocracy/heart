@@ -20,16 +20,34 @@ Write **one file** at the project root: `heart.json`. Use the bundle shape:
 
 ## Task shape
 
-| field    | type     | when to set                                                  |
-|----------|----------|--------------------------------------------------------------|
-| `id`     | string   | always — short unique slug (`api`, `web`, `worker-queue`)    |
-| `name`   | string   | always — sidebar label, capitalized                          |
-| `command`| string   | always — what to run (will execute under `zsh -l -i -c`)     |
-| `cwd`    | string   | always — absolute path or `~/...`                            |
-| `port`   | int      | when the service binds a TCP port (HTTP, WS, redis, postgres)|
-| `url`    | string   | when the service has an HTTP UI worth previewing             |
-| `folder` | string   | sidebar nesting; slash-separated: `Backend/Workers`          |
-| `kind`   | "claude" | only for Claude Code shortcut tasks                          |
+| field    | type                | when to set                                                                          |
+|----------|---------------------|--------------------------------------------------------------------------------------|
+| `id`     | string              | always — short unique slug (`api`, `web`, `worker-queue`)                            |
+| `name`   | string              | always — sidebar label, capitalized                                                  |
+| `command`| string              | always — what to run (will execute under `zsh -l -i -c`)                             |
+| `cwd`    | string              | always — absolute path or `~/...`                                                    |
+| `port`   | int                 | when the service binds a TCP port (HTTP, WS, redis, postgres)                        |
+| `url`    | string              | when the service has an HTTP UI worth previewing                                     |
+| `folder` | string              | sidebar nesting; slash-separated: `Backend/Workers`                                  |
+| `icon`   | string              | optional SF Symbol name (e.g. `bolt.fill`, `database`, `globe`) shown next to `name` |
+| `kind`   | "claude" \| "quick" | special task types — see below                                                       |
+
+### Task kinds
+
+There are three kinds of tasks Heart understands. Choose the right one — the
+UI surfaces each differently.
+
+| `kind`     | What it is                                              | Lives in the sidebar as…                                       |
+|------------|---------------------------------------------------------|----------------------------------------------------------------|
+| *(unset)*  | Long-running service. Manual start/stop, status dot.    | Regular row with play/stop/restart buttons + port + URL chips. |
+| `"claude"` | Claude Code shortcut. Multi-session, fresh terminal.    | Sparkles row pinned at the top of the sidebar.                 |
+| `"quick"`  | One-shot command (build, clean, migrate, etc.).         | Compact chip above the sidebar — one click runs, one click stops, output appears in the detail pane. |
+
+**Quick actions** are the place to put commands a developer runs **on demand**
+— not all the time. They have no port, no URL, no auto-readiness check; the
+command fires, its output streams into the terminal, and the user can stop
+it or just walk away. Pick 1–3 per project that the user reaches for most
+often (formatters, cache busters, migrations, codegen, install, …).
 
 ## Detection rules
 
@@ -76,6 +94,129 @@ For each `package.json`:
 - **redis** / **postgres** with config files at the repo root (`redis.conf`, `postgresql.conf`) → register `redis-server` / `postgres -D ./pgdata`.
 - **Mailpit / MailHog / Mailcatcher**: include if config references it.
 - **ngrok**: if `ngrok` is configured (e.g. `ngrok.yml` or a known wrapper command), include it with `url: "http://localhost:4040"` (the inspector UI).
+
+### Quick actions
+
+For each detected stack, pick the 1–3 commands developers run most often by
+hand — the ones that don't belong in a long-running terminal but are
+annoying to retype. Emit them as `kind: "quick"`, no `port`, no `url`. Give
+each a short `name` (1–2 words) so the chip stays compact; pick an SF
+Symbol for `icon` so the chip is recognizable even when truncated.
+
+Place each chip's `folder` under the matching service's folder (e.g.
+Laravel quick actions land in `Backend`) so they sit alongside their
+service in the sidebar tree.
+
+Examples by stack:
+
+**Laravel** (`composer.json` lists `laravel/framework`):
+```json
+{
+  "id": "artisan-optimize",
+  "name": "Optimize",
+  "command": "php artisan optimize",
+  "cwd": "<api-path>",
+  "folder": "Backend",
+  "icon": "bolt.fill",
+  "kind": "quick"
+},
+{
+  "id": "artisan-cache-clear",
+  "name": "Cache clear",
+  "command": "php artisan optimize:clear",
+  "cwd": "<api-path>",
+  "folder": "Backend",
+  "icon": "trash",
+  "kind": "quick"
+},
+{
+  "id": "artisan-migrate",
+  "name": "Migrate",
+  "command": "php artisan migrate",
+  "cwd": "<api-path>",
+  "folder": "Backend",
+  "icon": "arrow.triangle.2.circlepath",
+  "kind": "quick"
+}
+```
+
+**Node / npm** (any `package.json`):
+```json
+{
+  "id": "npm-install",
+  "name": "Install",
+  "command": "npm install",
+  "cwd": "<pkg-path>",
+  "folder": "Frontend",
+  "icon": "shippingbox.fill",
+  "kind": "quick"
+}
+```
+
+**Django** (`manage.py` exists):
+```json
+{
+  "id": "django-migrate",
+  "name": "Migrate",
+  "command": "python manage.py migrate",
+  "cwd": "<api-path>",
+  "folder": "Backend",
+  "icon": "arrow.triangle.2.circlepath",
+  "kind": "quick"
+},
+{
+  "id": "django-collectstatic",
+  "name": "Collect static",
+  "command": "python manage.py collectstatic --noinput",
+  "cwd": "<api-path>",
+  "folder": "Backend",
+  "icon": "tray.and.arrow.down.fill",
+  "kind": "quick"
+}
+```
+
+**Rails** (`Gemfile` mentions `rails`):
+```json
+{
+  "id": "rails-migrate",
+  "name": "Migrate",
+  "command": "bin/rails db:migrate",
+  "cwd": "<api-path>",
+  "folder": "Backend",
+  "icon": "arrow.triangle.2.circlepath",
+  "kind": "quick"
+}
+```
+
+**Vite / Next.js / generic Node frontend**:
+```json
+{
+  "id": "web-build",
+  "name": "Build",
+  "command": "npm run build",
+  "cwd": "<web-path>",
+  "folder": "Frontend",
+  "icon": "hammer.fill",
+  "kind": "quick"
+}
+```
+
+**Docker compose** present:
+```json
+{
+  "id": "docker-down",
+  "name": "Down",
+  "command": "docker compose down",
+  "cwd": "<repo-root>",
+  "icon": "stop.fill",
+  "kind": "quick"
+}
+```
+
+Keep the total quick-action count for a project small (≤ 5 across the
+whole bundle). The chip bar scrolls horizontally but is meant to be a
+short, scannable strip — anything beyond a handful belongs as a regular
+task or stays a one-off shell command.
 
 ### Claude Code shortcuts
 
@@ -126,7 +267,7 @@ of this skill is to surface the ones the project explicitly opted into.
 ## Output formatting
 
 - Two-space indentation, one task per object.
-- Order: frontends together, backends together, supporting daemons next, Claude shortcuts last.
+- Order: long-running services first (frontends together, backends together, supporting daemons next), then quick-action chips, then Claude shortcuts last.
 - After writing the file, print a short summary of what was found (which services, which were skipped and why) and remind the user: *"Drag `heart.json` into Heart's sidebar to import — every task lands under the project folder."*
 
 ## Worked example
@@ -178,6 +319,33 @@ Output `~/projects/my-shop/heart.json`:
       "folder": "Frontend",
       "port": 3000,
       "url": "http://localhost:3000"
+    },
+    {
+      "id": "artisan-optimize",
+      "name": "Optimize",
+      "command": "php artisan optimize",
+      "cwd": "~/projects/my-shop/api",
+      "folder": "Backend",
+      "icon": "bolt.fill",
+      "kind": "quick"
+    },
+    {
+      "id": "artisan-cache-clear",
+      "name": "Cache clear",
+      "command": "php artisan optimize:clear",
+      "cwd": "~/projects/my-shop/api",
+      "folder": "Backend",
+      "icon": "trash",
+      "kind": "quick"
+    },
+    {
+      "id": "web-install",
+      "name": "Install",
+      "command": "npm install",
+      "cwd": "~/projects/my-shop/web",
+      "folder": "Frontend",
+      "icon": "shippingbox.fill",
+      "kind": "quick"
     },
     {
       "id": "claude-root",

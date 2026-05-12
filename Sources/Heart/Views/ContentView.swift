@@ -24,6 +24,7 @@ enum DetailTab: String, CaseIterable, Hashable {
 struct ContentView: View {
     @ObservedObject var store: TaskStore
     @ObservedObject var processManager: ProcessManager
+    @ObservedObject var browserManager: BrowserManager
 
     @State private var selectedProject: String?
     /// Per-project memory of the last selected task. Restored when switching tabs.
@@ -40,11 +41,22 @@ struct ContentView: View {
     @State private var editingTask: DevTask?
     @State private var importError: String?
     @State private var importToast: String?
-    @State private var sidebarHidden: Bool = false
     @State private var activeTabs: [String: DetailTab] = [:]
+    /// Drives the native macOS sidebar toggle in the window title bar.
+    /// Was pinned to `.constant(.all)` historically because of a SwiftUI bug
+    /// that auto-collapsed the column on selection changes; that behavior is
+    /// no longer reproducible in macOS 13.3+, so we let the user control it.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     /// Pending project to delete (with confirm dialog).
     @State private var deleteProjectTarget: String?
     @State private var showFormatHelp = false
+    @State private var addFolderTarget: AddFolderRequest?
+    @State private var renameFolderTarget: RenameFolderRequest?
+    @State private var resumeClaudeTarget: DevTask?
+    /// Toggled by the "Edit" toolbar button. When on, the sidebar surfaces
+    /// drag handles so the user can reorder tasks + folders. Off by default
+    /// so the normal view stays uncluttered.
+    @State private var editMode: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -81,6 +93,45 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) { SettingsView(store: store) }
         .sheet(isPresented: $showFormatHelp) {
             JSONFormatHelp(onClose: { showFormatHelp = false })
+        }
+        .sheet(item: $addFolderTarget) { req in
+            AddFolderPrompt(
+                parent: req.parent,
+                onCancel: { addFolderTarget = nil },
+                onConfirm: { name in
+                    let trimmed = name.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.isEmpty else { addFolderTarget = nil; return }
+                    let full = req.parent.isEmpty ? trimmed : "\(req.parent)/\(trimmed)"
+                    store.addFolder(path: full)
+                    addFolderTarget = nil
+                }
+            )
+        }
+        .sheet(item: $resumeClaudeTarget) { task in
+            ClaudeResumeSheet(
+                task: task,
+                onCancel: { resumeClaudeTarget = nil },
+                onResume: { options in
+                    processManager.resumeSession(for: task, options: options)
+                    selectedTaskId = task.id
+                    resumeClaudeTarget = nil
+                }
+            )
+        }
+        .sheet(item: $renameFolderTarget) { req in
+            RenameFolderPrompt(
+                currentPath: req.path,
+                onCancel: { renameFolderTarget = nil },
+                onConfirm: { newName in
+                    let trimmed = newName.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.isEmpty else { renameFolderTarget = nil; return }
+                    let parts = req.path.split(separator: "/").map(String.init)
+                    let parent = parts.dropLast().joined(separator: "/")
+                    let newFull = parent.isEmpty ? trimmed : "\(parent)/\(trimmed)"
+                    store.renameFolder(oldPath: req.path, newPath: newFull)
+                    renameFolderTarget = nil
+                }
+            )
         }
         .sheet(item: $pendingImport) { pending in
             ImportFolderPrompt(
@@ -238,12 +289,20 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var toolbarItems: some ToolbarContent {
-        ToolbarItemGroup {
-            Button { toggleSidebar() } label: {
-                Label("Toggle Sidebar", systemImage: "sidebar.left")
+        // `.primaryAction` pins the group to the right end of the title bar.
+        // Without it macOS spreads the items to fill the center, which looked
+        // like our buttons were "floating in the middle".
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                editMode.toggle()
+            } label: {
+                Label(editMode ? "Done" : "Edit",
+                      systemImage: editMode ? "checkmark.circle.fill" : "pencil")
             }
-            .keyboardShortcut("s", modifiers: [.command, .control])
-            .help("Toggle sidebar (⌃⌘S)")
+            .help(editMode
+                  ? "Exit edit mode"
+                  : "Edit mode — reorder tasks and folders")
+            .keyboardShortcut("e", modifiers: [.command])
 
             Button {
                 if let project = selectedProject {
@@ -278,12 +337,8 @@ struct ContentView: View {
     @ViewBuilder
     private var mainPane: some View {
         if let project = selectedProject, store.orderedProjects.contains(project) {
-            Group {
-                if sidebarHidden {
-                    detail
-                } else {
-                    NavigationSplitView(columnVisibility: .constant(.all)) {
-                        ProjectSidebar(
+            NavigationSplitView(columnVisibility: $columnVisibility) {
+                    ProjectSidebar(
                             store: store,
                             processManager: processManager,
                             project: project,
@@ -301,15 +356,28 @@ struct ContentView: View {
                             onDeleteFolder: { deleteFolder(path: $0) },
                             onDropReplace: { urls in handleDroppedURLs(urls, into: project) },
                             onPickImport: { pickAndImport(into: project) },
-                            onAddTask: { addBlankTask(to: project) }
+                            onAddTask: { addBlankTask(to: project) },
+                            onQuickTap: { task in toggleQuickAction(task) },
+                            onAddQuickAction: { addBlankTask(to: project, kind: "quick") },
+                            onAddFolder: { parent in
+                                addFolderTarget = AddFolderRequest(parent: parent)
+                            },
+                            onRenameFolder: { path in
+                                renameFolderTarget = RenameFolderRequest(path: path)
+                            },
+                            onMoveTask: { task, folder in
+                                store.moveTask(id: task.id, toFolder: folder)
+                            },
+                            onResumeClaude: { resumeClaudeTarget = $0 },
+                            editMode: editMode,
+                            isDirty: isProjectDirty(project),
+                            onSaveSource: { saveProject(project) }
                         )
-                    } detail: {
-                        detail
-                    }
-                    .navigationSplitViewStyle(.balanced)
-                    .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
-                }
+            } detail: {
+                detail
             }
+            .navigationSplitViewStyle(.balanced)
+            .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
         } else {
             welcomePlaceholder
         }
@@ -330,8 +398,6 @@ struct ContentView: View {
         }
         return result
     }
-
-    private func toggleSidebar() { sidebarHidden.toggle() }
 
     private func switchToProject(_ project: String) {
         if let prev = selectedProject, prev != project, let id = selectedTaskId {
@@ -469,6 +535,39 @@ struct ContentView: View {
         tasks.contains { processManager.status($0.id).isRunning }
     }
 
+    /// True when the project is linked to a heart.json but its on-disk content
+    /// differs from the in-memory bundle. Used to surface the inline "Save"
+    /// button in the SourceBar.
+    private func isProjectDirty(_ project: String) -> Bool {
+        guard let sourcePath = store.bundleSource(forFolder: project) else {
+            return false
+        }
+        let currentBundle = bundle(forFolder: project)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let currentData = try? encoder.encode(currentBundle) else { return false }
+        guard let fileData = try? Data(contentsOf: URL(fileURLWithPath: sourcePath)) else {
+            // File missing → treat as dirty so the user is prompted to re-save.
+            return true
+        }
+        // Normalize the on-disk payload through the same encoder so whitespace /
+        // key order don't trigger false-positive dirty states.
+        let fileBundle: TaskBundle? = {
+            if let parsed = try? JSONDecoder().decode(TaskBundle.self, from: fileData) {
+                return parsed
+            }
+            if let arr = try? JSONDecoder().decode([DevTask].self, from: fileData) {
+                return TaskBundle(name: nil, tasks: arr)
+            }
+            return nil
+        }()
+        guard let bundle = fileBundle,
+              let normalizedFileData = try? encoder.encode(bundle) else {
+            return true
+        }
+        return normalizedFileData != currentData
+    }
+
     // MARK: - Task helpers
 
     private func duplicateTask(_ task: DevTask) {
@@ -503,15 +602,33 @@ struct ContentView: View {
         processManager.start(claudeTask)
     }
 
-    private func addBlankTask(to project: String) {
+    private func addBlankTask(to project: String, kind: String? = nil) {
         let blank = DevTask(
             id: UUID().uuidString,
             name: "",
             command: "",
             cwd: NSHomeDirectory(),
-            folder: project
+            folder: project,
+            kind: kind
         )
         editingTask = blank
+    }
+
+    /// Quick-action chip tapped — toggle process + select for the detail pane.
+    /// Identical to a regular row tap but routes through here so we can keep the
+    /// chip bar logic decoupled from the sidebar's normal selection handling.
+    private func toggleQuickAction(_ task: DevTask) {
+        if !store.tasks.contains(where: { $0.id == task.id }) {
+            // Task may have just been edited and replaced — use the latest copy.
+            return
+        }
+        if processManager.status(task.id).isRunning {
+            processManager.stop(task)
+            // Keep selection so the user can still see the buffer post-stop.
+        } else {
+            processManager.start(task)
+            selectedTaskId = task.id
+        }
     }
 
     private func deleteTask(_ task: DevTask) {
@@ -524,6 +641,7 @@ struct ContentView: View {
             selectedTaskId = projectTasks.first(where: { $0.id != task.id })?.id
         }
         store.remove(id: task.id)
+        browserManager.clear(taskId: task.id)
     }
 
     private func deleteFolder(path: String) {
@@ -540,6 +658,7 @@ struct ContentView: View {
             selectedTaskId = remaining.first?.id
         }
         store.removeFolder(path: path)
+        for task in toRemove { browserManager.clear(taskId: task.id) }
     }
 
     private func performDeleteProject(_ name: String) {
@@ -548,6 +667,7 @@ struct ContentView: View {
             processManager.stop(task)
         }
         store.removeFolder(path: name)
+        for task in toRemove { browserManager.clear(taskId: task.id) }
         selectedTaskByProject.removeValue(forKey: name)
         if selectedProject == name {
             selectedProject = store.orderedProjects.first
@@ -674,7 +794,12 @@ struct ContentView: View {
 
         let normalized = bundle.tasks.map { task -> DevTask in
             var t = task
-            if t.name.trimmingCharacters(in: .whitespaces).isEmpty { t.name = stem }
+            let hasIcon = !(t.icon ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+            // Only synthesize a name from the file stem if the task lacks BOTH
+            // a name and an icon — an icon alone is enough identity.
+            if t.name.trimmingCharacters(in: .whitespaces).isEmpty, !hasIcon {
+                t.name = stem
+            }
             return t
         }
         let cleaned = normalized.filter {
@@ -727,17 +852,22 @@ struct ContentView: View {
             return
         }
 
-        // Refresh-on-collision: same folder name = user updated their config and
-        // re-dropped. Replace the contents instead of suffixing duplicates.
-        let existing = store.tasksUnder(path: folder)
-        if !existing.isEmpty {
-            for task in existing where processManager.status(task.id).isRunning {
-                processManager.stop(task)
-            }
-            store.removeFolder(path: folder)
+        // Stop anything currently running under this folder so we don't
+        // strand zombie processes attached to deleted task ids.
+        for task in store.tasksUnder(path: folder)
+        where processManager.status(task.id).isRunning {
+            processManager.stop(task)
         }
-        store.append(resolved.tasks, folder: folder)
-        store.setBundleSource(folder: folder, path: resolved.sourcePath)
+
+        // Single atomic mutation — was previously remove + append, two
+        // @Published changes which made SwiftUI render an intermediate
+        // (empty) sidebar and lingering "broken" tree until the window was
+        // reopened.
+        store.replaceProject(
+            folder,
+            with: resolved.tasks,
+            source: URL(fileURLWithPath: resolved.sourcePath)
+        )
 
         processManager.scanForExternalServices(store.tasksUnder(path: folder))
         importToast = "Imported \(resolved.tasks.count) task\(resolved.tasks.count == 1 ? "" : "s") into '\(folder)'"
@@ -757,11 +887,14 @@ struct ContentView: View {
     private var detail: some View {
         if let id = resolvedTaskId, let task = store.tasks.first(where: { $0.id == id }) {
             if task.isClaudeShortcut {
+                // Claude session containers keep their own per-session state in
+                // ProcessManager — re-mount on task switch is fine here.
                 ClaudeDetailView(task: task, processManager: processManager)
                     .id("claude-\(id)")
             } else {
+                // No `.id` here: OutputView swaps the terminalView in-place so
+                // SwiftTerm's scroll position survives task switches.
                 regularDetail(task: task, id: id)
-                    .id("regular-\(id)")
             }
         } else {
             emptyProjectPlaceholder
@@ -939,8 +1072,11 @@ struct ContentView: View {
             .allowsHitTesting(active == .terminal)
 
             if availableTabs.contains(.browser), let url = task.url {
-                BrowserView(url: url)
-                    .id("browser-\(id)")
+                // Model comes from BrowserManager so the WKWebView, its cookies,
+                // history, scroll position, and granted permissions survive when
+                // we switch to another task and back.
+                BrowserView(url: url,
+                            model: browserManager.model(for: id, initialURL: url))
                     .opacity(active == .browser ? 1 : 0)
                     .allowsHitTesting(active == .browser)
             }
@@ -1077,7 +1213,38 @@ struct EditTaskSheet: View {
     @State private var url: String
     @State private var folder: String
     @State private var autoStart: Bool
-    @State private var isClaudeShortcut: Bool
+    @State private var taskKind: TaskKind
+    @State private var icon: String?
+    @State private var showIconPicker: Bool = false
+
+    enum TaskKind: String, CaseIterable, Identifiable {
+        case service, claude, quick
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .service: return "Service"
+            case .claude:  return "Claude"
+            case .quick:   return "Quick"
+            }
+        }
+        var iconName: String {
+            switch self {
+            case .service: return "server.rack"
+            case .claude:  return "sparkles"
+            case .quick:   return "bolt.fill"
+            }
+        }
+        var detail: String {
+            switch self {
+            case .service:
+                return "Long-running process. Manual start/stop, status indicator, runs in its own terminal."
+            case .claude:
+                return "Pinned at the top of the sidebar. Each click opens a fresh terminal session — good for keeping multiple Claude chats in the same dir."
+            case .quick:
+                return "Surfaced as a chip above the sidebar. One click runs the command and shows its output; click again to stop. No port / URL config."
+            }
+        }
+    }
 
     init(task: DevTask, onCancel: @escaping () -> Void, onSave: @escaping (DevTask) -> Void) {
         self.task = task
@@ -1090,7 +1257,10 @@ struct EditTaskSheet: View {
         _url = State(initialValue: task.url ?? "")
         _folder = State(initialValue: task.folder ?? "")
         _autoStart = State(initialValue: task.autoStart)
-        _isClaudeShortcut = State(initialValue: task.isClaudeShortcut)
+        let initialKind: TaskKind = task.isClaudeShortcut ? .claude
+            : (task.isQuickAction ? .quick : .service)
+        _taskKind = State(initialValue: initialKind)
+        _icon = State(initialValue: task.icon)
     }
 
     private var isNewTask: Bool {
@@ -1107,9 +1277,20 @@ struct EditTaskSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
                     section(title: "Essentials", icon: "doc.text") {
-                        field(label: "Name",
-                              hint: "Shown in the sidebar.") {
-                            styledTextField(placeholder: "My dev server", text: $name)
+                        HStack(alignment: .top, spacing: 14) {
+                            VStack(spacing: 6) {
+                                Text("ICON")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .tracking(0.6)
+                                iconPickerButton
+                            }
+                            VStack(alignment: .leading, spacing: 16) {
+                                field(label: "Name",
+                                      hint: "Shown in the sidebar. Optional when an icon is selected.") {
+                                    styledTextField(placeholder: "My dev server", text: $name)
+                                }
+                            }
                         }
                         field(label: "Project / Folder",
                               hint: "Top-level segment becomes the tab name. Use \"/\" for sub-folders, e.g. Backend/Workers.") {
@@ -1127,52 +1308,53 @@ struct EditTaskSheet: View {
                         }
                     }
 
-                    section(title: "Network", icon: "network") {
-                        field(label: "Port",
-                              hint: "Optional. Enables the KILL PORT button and a readiness check (status stays Starting until the port binds).") {
-                            styledTextField(placeholder: "3000",
-                                            text: $portText,
-                                            monospaced: true)
-                                .onChange(of: portText) { new in
-                                    let filtered = new.filter(\.isNumber)
-                                    if filtered != new { portText = filtered }
-                                }
-                        }
-                        field(label: "URL",
-                              hint: "Optional. Adds a Browser tab to the detail pane.") {
-                            styledTextField(placeholder: "http://localhost:3000",
-                                            text: $url,
-                                            monospaced: true)
+                    if taskKind == .service {
+                        section(title: "Network", icon: "network") {
+                            field(label: "Port",
+                                  hint: "Optional. Enables the KILL PORT button and a readiness check (status stays Starting until the port binds).") {
+                                styledTextField(placeholder: "3000",
+                                                text: $portText,
+                                                monospaced: true)
+                                    .onChange(of: portText) { new in
+                                        let filtered = new.filter(\.isNumber)
+                                        if filtered != new { portText = filtered }
+                                    }
+                            }
+                            field(label: "URL",
+                                  hint: "Optional. Adds a Browser tab to the detail pane.") {
+                                styledTextField(placeholder: "http://localhost:3000",
+                                                text: $url,
+                                                monospaced: true)
+                            }
                         }
                     }
 
-                    section(title: "Behavior", icon: "switch.2") {
-                        Toggle(isOn: $isClaudeShortcut) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "sparkles")
-                                        .foregroundStyle(Color.purple)
-                                    Text("Claude shortcut")
-                                        .font(.system(size: 13, weight: .medium))
-                                }
-                                Text("Pins the task at the top of the sidebar and opens a fresh terminal session each time it's clicked (good for keeping multiple `claude` chats in the same dir).")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
+                    section(title: "Type", icon: "switch.2") {
+                        Picker("Task type", selection: $taskKind) {
+                            ForEach(TaskKind.allCases) { kind in
+                                Label(kind.label, systemImage: kind.iconName).tag(kind)
                             }
                         }
-                        .toggleStyle(.switch)
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
 
-                        Toggle(isOn: $autoStart) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Auto-start on launch")
-                                    .font(.system(size: 13, weight: .medium))
-                                Text("Reserved — the UI flag is saved but not yet acted upon.")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
+                        Text(taskKind.detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if taskKind == .service {
+                            Toggle(isOn: $autoStart) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Auto-start on launch")
+                                        .font(.system(size: 13, weight: .medium))
+                                    Text("Reserved — the UI flag is saved but not yet acted upon.")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
                             }
+                            .toggleStyle(.switch)
                         }
-                        .toggleStyle(.switch)
                     }
                 }
                 .padding(.horizontal, 26)
@@ -1188,6 +1370,37 @@ struct EditTaskSheet: View {
     }
 
     // MARK: - sections
+
+    @ViewBuilder
+    private var iconPickerButton: some View {
+        Button {
+            showIconPicker = true
+        } label: {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(Color.accentColor.opacity(0.12))
+                RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(Color.accentColor.opacity(0.35),
+                                  style: StrokeStyle(lineWidth: 0.8, dash: icon == nil ? [3, 2] : []))
+                Image(systemName: icon ?? "square.grid.2x2")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .frame(width: 56, height: 56)
+        }
+        .buttonStyle(.plain)
+        .help(icon ?? "Choose icon")
+        .sheet(isPresented: $showIconPicker) {
+            IconPickerSheet(
+                current: icon,
+                onCancel: { showIconPicker = false },
+                onPick: { picked in
+                    icon = picked
+                    showIconPicker = false
+                }
+            )
+        }
+    }
 
     @ViewBuilder
     private func section<Content: View>(title: String,
@@ -1349,9 +1562,13 @@ struct EditTaskSheet: View {
     }
 
     private var isValid: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !command.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !cwd.trimmingCharacters(in: .whitespaces).isEmpty
+        // Either a name or an icon is enough to identify the task in the UI —
+        // we only require one of the two so users can ship icon-only chips.
+        let hasIdentity = !name.trimmingCharacters(in: .whitespaces).isEmpty
+            || !(icon ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+        let hasCommand = !command.trimmingCharacters(in: .whitespaces).isEmpty
+        let hasCwd = !cwd.trimmingCharacters(in: .whitespaces).isEmpty
+        return hasIdentity && hasCommand && hasCwd
     }
 
     private func commit() {
@@ -1359,16 +1576,30 @@ struct EditTaskSheet: View {
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
         let port: Int? = Int(portText.trimmingCharacters(in: .whitespaces))
+        let kindString: String? = {
+            switch taskKind {
+            case .service: return nil
+            case .claude:  return "claude"
+            case .quick:   return "quick"
+            }
+        }()
+        // Port / URL only apply to long-running services — strip them on the
+        // other kinds so a user who toggled the type doesn't leave dead config
+        // behind in the JSON.
+        let resolvedPort: Int? = (taskKind == .service) ? port : nil
+        let resolvedURL: String? = (taskKind == .service && !trimmedURL.isEmpty) ? trimmedURL : nil
         let updated = DevTask(
             id: task.id,
             name: name.trimmingCharacters(in: .whitespaces),
             command: command.trimmingCharacters(in: .whitespaces),
             cwd: cwd.trimmingCharacters(in: .whitespaces),
-            port: port,
-            url: trimmedURL.isEmpty ? nil : trimmedURL,
+            port: resolvedPort,
+            url: resolvedURL,
             autoStart: autoStart,
             folder: trimmedFolder.isEmpty ? nil : trimmedFolder,
-            kind: isClaudeShortcut ? "claude" : nil
+            kind: kindString,
+            icon: icon,
+            order: task.order
         )
         onSave(updated)
     }
@@ -1443,6 +1674,18 @@ struct RenameRequest: Identifiable {
     let currentName: String
 }
 
+struct AddFolderRequest: Identifiable {
+    let id = UUID()
+    /// Parent folder absolute path. Empty string = project root (caller must
+    /// prepend the project name before calling `store.addFolder`).
+    let parent: String
+}
+
+struct RenameFolderRequest: Identifiable {
+    let id = UUID()
+    let path: String
+}
+
 // MARK: - Prompts
 
 struct ImportFolderPrompt: View {
@@ -1492,6 +1735,116 @@ struct ImportFolderPrompt: View {
         let trimmed = folderName.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         onConfirm(trimmed)
+    }
+}
+
+struct AddFolderPrompt: View {
+    let parent: String
+    let onCancel: () -> Void
+    let onConfirm: (String) -> Void
+
+    @State private var name: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.tint)
+                Text("New folder")
+                    .font(.title3.bold())
+            }
+
+            Text(parent.isEmpty
+                 ? "Folder will be created at the project root."
+                 : "Folder will be created inside '\(parent)'.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("Folder name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { confirm() }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create") { confirm() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    private func confirm() {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        onConfirm(trimmed)
+    }
+}
+
+struct RenameFolderPrompt: View {
+    let currentPath: String
+    let onCancel: () -> Void
+    let onConfirm: (String) -> Void
+
+    @State private var newName: String = ""
+
+    private var currentName: String {
+        currentPath.split(separator: "/").last.map(String.init) ?? currentPath
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "pencil")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.tint)
+                Text("Rename folder")
+                    .font(.title3.bold())
+            }
+
+            Text("Renaming '\(currentPath)'. Tasks inside this folder (and any nested folders) keep their data — only the folder path changes.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("Folder name", text: $newName)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { confirm() }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Rename") { confirm() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!isValid)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .onAppear { newName = currentName }
+    }
+
+    private var isValid: Bool {
+        let t = newName.trimmingCharacters(in: .whitespaces)
+        return !t.isEmpty && t != currentName
+    }
+
+    private func confirm() {
+        let t = newName.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return }
+        onConfirm(t)
     }
 }
 

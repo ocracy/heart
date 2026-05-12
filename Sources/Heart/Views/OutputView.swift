@@ -3,51 +3,55 @@ import AppKit
 import SwiftTerm
 
 /// Hosts a `LocalProcessTerminalView` (owned by `ProcessManager`, one per task)
-/// inside SwiftUI. Mount happens **once** per container — see makeNSView —
-/// because shuffling the same terminalView between containers via
-/// `removeFromSuperview` / `addSubview` on every selection change occasionally
-/// blanked the visible buffer on macOS (the buffer is still there, but the
-/// view doesn't redraw it).
+/// inside SwiftUI. The container is mounted **once** per regularDetail and the
+/// embedded terminal view is swapped in/out when the user changes tasks — so
+/// SwiftTerm's internal scroll position survives selection changes (re-mounting
+/// the whole representable on every switch was resetting it to the bottom).
 ///
-/// Callers ensure container identity is fresh-per-task by tagging the parent
-/// view with `.id(task.id)` so SwiftUI rebuilds the NSViewRepresentable
-/// (and re-runs makeNSView with a brand-new container) when the user switches
-/// tasks. The same terminalView instance can keep being passed in — moving it
-/// between containers in makeNSView is a single atomic operation, and the
-/// pending `requestRefresh` redraws the existing buffer.
+/// Callers do NOT tag the parent view with `.id(task.id)` — the swap-on-update
+/// here is what keeps each task's buffer visible.
 struct OutputView: NSViewRepresentable {
     let terminalView: LocalProcessTerminalView
 
-    func makeNSView(context: Context) -> NSView {
-        let container = ContainerView()
+    func makeNSView(context: Context) -> TerminalContainerView {
+        let container = TerminalContainerView()
         container.autoresizingMask = [.width, .height]
+        container.attach(terminalView)
+        return container
+    }
 
-        // Detach from any previous parent (different task's container) and mount.
-        terminalView.removeFromSuperview()
-        terminalView.frame = container.bounds
-        terminalView.autoresizingMask = [.width, .height]
-        container.addSubview(terminalView)
+    func updateNSView(_ container: TerminalContainerView, context: Context) {
+        container.attach(terminalView)
+    }
+}
 
-        // Force the terminal to redraw its current buffer once the view is in
-        // the window — without this, switching tasks sometimes shows a stale
-        // / empty canvas even though the SwiftTerm buffer still has the output.
-        DispatchQueue.main.async { [weak terminalView] in
-            guard let view = terminalView, let window = view.window else { return }
+/// Owns one terminal view at a time. `attach` is idempotent: passing the same
+/// terminal twice in a row does nothing, so SwiftUI's frequent updateNSView
+/// calls don't churn the view tree.
+final class TerminalContainerView: NSView {
+    private weak var currentTerminal: LocalProcessTerminalView?
+
+    func attach(_ tv: LocalProcessTerminalView) {
+        if currentTerminal === tv { return }
+        // Remove the previously-attached terminal (if any) and the new one's
+        // previous parent (a different TerminalContainerView from another
+        // task swap) so we don't end up with the same NSView in two hierarchies.
+        currentTerminal?.removeFromSuperview()
+        tv.removeFromSuperview()
+        tv.frame = bounds
+        tv.autoresizingMask = [.width, .height]
+        addSubview(tv)
+        currentTerminal = tv
+
+        // Force a redraw once the view is on-screen — SwiftTerm sometimes
+        // shows a stale / empty canvas right after a re-attach even though
+        // the buffer is still populated. Doing this async lets the view
+        // settle into its window first.
+        DispatchQueue.main.async { [weak tv] in
+            guard let view = tv, let window = view.window else { return }
             window.makeFirstResponder(view)
             view.needsDisplay = true
             view.getTerminal().refresh(startRow: 0, endRow: view.getTerminal().rows)
         }
-
-        return container
-    }
-
-    func updateNSView(_ container: NSView, context: Context) {
-        // No-op: container identity is fresh per task (via `.id(task.id)`
-        // higher up). The mount in makeNSView is the only place we touch the
-        // terminalView's view tree.
     }
 }
-
-/// Empty NSView subclass — exists only to give the container a stable type
-/// for debugging breakpoints if mount issues resurface.
-private final class ContainerView: NSView {}

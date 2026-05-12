@@ -6,11 +6,19 @@ struct HeartApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = TaskStore()
     @StateObject private var processManager = ProcessManager()
+    @StateObject private var browserManager = BrowserManager()
 
     var body: some Scene {
-        WindowGroup("Heart") {
-            ContentView(store: store, processManager: processManager)
+        // Title text is intentionally empty — the project tab bar at the top of
+        // ContentView already shows the active project's name, so the system
+        // title would just duplicate it (and looked centered + cluttered).
+        WindowGroup("") {
+            ContentView(store: store,
+                        processManager: processManager,
+                        browserManager: browserManager)
                 .frame(minWidth: 900, minHeight: 560)
+                .navigationTitle("")
+                .toolbarBackground(.visible, for: .windowToolbar)
                 .onAppear {
                     appDelegate.processManager = processManager
                 }

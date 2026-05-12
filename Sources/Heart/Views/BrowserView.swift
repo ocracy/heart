@@ -2,18 +2,14 @@ import SwiftUI
 import AppKit
 import WebKit
 
-/// In-app browser per task. Holds a persistent `WKWebView` (model owns it) so navigation
-/// state survives Terminal↔Browser tab switches. Mobile toggle swaps the user-agent and
-/// clamps the viewport to 390pt centered. "Open in Chrome" hands the current URL to the
-/// system Chrome.app (or default browser if Chrome isn't installed).
+/// In-app browser per task. The persistent `WKWebView` lives in BrowserModel, which is
+/// cached per task by `BrowserManager` — so cookies, localStorage, navigation history,
+/// scroll position, and granted camera/microphone permissions survive task switches.
+/// Mobile toggle swaps the user-agent and clamps the viewport to 390pt centered.
+/// "Open in Chrome" hands the current URL to the system Chrome.app (or default browser).
 struct BrowserView: View {
     let url: String
-    @StateObject private var model: BrowserModel
-
-    init(url: String) {
-        self.url = url
-        _model = StateObject(wrappedValue: BrowserModel(initialURL: url))
-    }
+    @ObservedObject var model: BrowserModel
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,7 +20,7 @@ struct BrowserView: View {
         // Task edited → new URL prop → navigate the existing WKWebView instead of
         // tearing it down. Keeps cookies, history, scroll position; just swaps the page.
         .onChange(of: url) { newURL in
-            model.navigate(newURL)
+            model.navigateIfChanged(newURL)
         }
     }
 
@@ -129,19 +125,50 @@ struct BrowserView: View {
     }
 }
 
+/// Container around the per-task `WKWebView` so SwiftUI can swap a different
+/// task's web view in without throwing the previous one away. Mirrors the
+/// terminal-container pattern in OutputView: if we returned the WKWebView
+/// directly from makeNSView, switching tasks would leave the **old** task's
+/// page on screen — updateNSView gets the new prop but has no chance to swap
+/// the underlying NSView.
 private struct WebViewHost: NSViewRepresentable {
     let webView: WKWebView
-    func makeNSView(context: Context) -> WKWebView { webView }
-    func updateNSView(_ nsView: WKWebView, context: Context) { }
+    func makeNSView(context: Context) -> WebContainerView {
+        let container = WebContainerView()
+        container.autoresizingMask = [.width, .height]
+        container.attach(webView)
+        return container
+    }
+    func updateNSView(_ container: WebContainerView, context: Context) {
+        container.attach(webView)
+    }
 }
 
-final class BrowserModel: NSObject, ObservableObject {
+final class WebContainerView: NSView {
+    private weak var currentWebView: WKWebView?
+
+    func attach(_ wv: WKWebView) {
+        if currentWebView === wv { return }
+        currentWebView?.removeFromSuperview()
+        wv.removeFromSuperview()
+        wv.frame = bounds
+        wv.autoresizingMask = [.width, .height]
+        addSubview(wv)
+        currentWebView = wv
+    }
+}
+
+final class BrowserModel: NSObject, ObservableObject, WKUIDelegate, WKNavigationDelegate {
     let webView: WKWebView
     @Published var addressBar: String
     @Published var canGoBack: Bool = false
     @Published var canGoForward: Bool = false
     @Published var isLoading: Bool = false
     @Published var isMobile: Bool = false
+
+    /// Tracks the most recent URL set via the task's `url` field, so a subsequent
+    /// no-op task switch (same URL) doesn't trigger an unwanted reload.
+    private var lastTaskURL: String
 
     private var observations: [NSKeyValueObservation] = []
 
@@ -151,12 +178,33 @@ final class BrowserModel: NSObject, ObservableObject {
 
     init(initialURL: String) {
         let config = WKWebViewConfiguration()
-        // Persistent data store: cookies, localStorage retained across launches (per WebKit defaults).
+        // Persistent data store — cookies, localStorage, IndexedDB survive launches.
         config.websiteDataStore = .default()
+        // Modern web feature support: inline video, autoplay-friendly, JS-driven media.
+        config.allowsAirPlayForMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
+        // Enable developer extras (right-click → Inspect Element) — useful for the
+        // local dev-server context Heart is designed around.
+        config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        if #available(macOS 13.3, *) {
+            config.preferences.isElementFullscreenEnabled = true
+        }
+
         self.webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 600),
                                  configuration: config)
+        // Match what the system Safari sends so SaaS sign-ins don't refuse the UA.
+        self.webView.customUserAgent = nil
+        self.webView.allowsBackForwardNavigationGestures = true
+        self.webView.allowsMagnification = true
+
         self.addressBar = initialURL
+        self.lastTaskURL = initialURL
         super.init()
+
+        // Delegates AFTER super.init — needed to grant getUserMedia() prompts and to
+        // surface JS dialogs / navigation events later if we add support.
+        self.webView.uiDelegate = self
+        self.webView.navigationDelegate = self
 
         observations.append(webView.observe(\.url, options: [.new]) { [weak self] view, _ in
             DispatchQueue.main.async {
@@ -186,6 +234,16 @@ final class BrowserModel: NSObject, ObservableObject {
         webView.load(URLRequest(url: url))
     }
 
+    /// Used when the task's `url` field changes — navigate only if it's actually
+    /// different from the last task-driven URL, so picking the same task again
+    /// (or selection-flicker) doesn't blow away the user's current page state.
+    func navigateIfChanged(_ raw: String) {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard s != lastTaskURL else { return }
+        lastTaskURL = s
+        navigate(s)
+    }
+
     func goBack() { if webView.canGoBack { webView.goBack() } }
     func goForward() { if webView.canGoForward { webView.goForward() } }
 
@@ -194,10 +252,10 @@ final class BrowserModel: NSObject, ObservableObject {
             webView.stopLoading()
             return
         }
-        // `WKWebView.reload()` is a no-op if the view never finished its initial load (which
-        // happens with localhost dev servers that briefly 502 before catching up). Issuing a
-        // fresh `load(URLRequest)` on the current URL — falling back to the address bar —
-        // always re-fires the request.
+        // `WKWebView.reload()` is a no-op if the view never finished its initial load
+        // (which happens with localhost dev servers that briefly 502 before catching
+        // up). Issuing a fresh `load(URLRequest)` on the current URL — falling back to
+        // the address bar — always re-fires the request.
         if let url = webView.url {
             webView.load(URLRequest(url: url))
         } else {
@@ -236,5 +294,33 @@ final class BrowserModel: NSObject, ObservableObject {
         } else {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // MARK: - WKUIDelegate
+
+    /// Auto-grant getUserMedia() prompts (camera / microphone). Without this,
+    /// `navigator.mediaDevices.getUserMedia()` resolves with NotAllowedError because
+    /// WKWebView's default decision is to deny. Info.plist must also declare
+    /// NSCameraUsageDescription and NSMicrophoneUsageDescription — see build.sh / dist.sh.
+    @available(macOS 12.0, *)
+    func webView(_ webView: WKWebView,
+                 requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo,
+                 type: WKMediaCaptureType,
+                 decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        decisionHandler(.grant)
+    }
+
+    /// Open links that try to spawn a new window (target=_blank, window.open) in the
+    /// same webview instead of silently dropping them — the default behavior is to
+    /// return nil, which makes those links appear broken to the user.
+    func webView(_ webView: WKWebView,
+                 createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+            webView.load(URLRequest(url: url))
+        }
+        return nil
     }
 }

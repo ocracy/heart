@@ -12,6 +12,11 @@ struct DevTask: Codable, Identifiable, Equatable, Hashable {
     /// Behavior tag. `"claude"` makes the task a multi-session shortcut pinned at the top
     /// of the sidebar; clicking it opens a fresh terminal session each time. `nil` = regular service.
     var kind: String?
+    /// SF Symbol name (e.g. "server.rack") used as the row / chip icon. nil = default.
+    var icon: String?
+    /// Manual sort order within the parent folder. Smaller value renders first.
+    /// nil = unsorted, ordered alphabetically / insertion-order after sorted ones.
+    var order: Double?
 
     init(id: String = UUID().uuidString,
          name: String,
@@ -21,7 +26,9 @@ struct DevTask: Codable, Identifiable, Equatable, Hashable {
          url: String? = nil,
          autoStart: Bool = false,
          folder: String? = nil,
-         kind: String? = nil) {
+         kind: String? = nil,
+         icon: String? = nil,
+         order: Double? = nil) {
         self.id = id
         self.name = name
         self.command = command
@@ -31,15 +38,21 @@ struct DevTask: Codable, Identifiable, Equatable, Hashable {
         self.autoStart = autoStart
         self.folder = folder
         self.kind = kind
+        self.icon = icon
+        self.order = order
     }
 
     var isClaudeShortcut: Bool { kind == "claude" }
+    /// One-shot command surfaced as a chip above the sidebar. Runs on click and
+    /// shows its output in the detail pane; no on/off status indicator in the
+    /// sidebar because they aren't long-lived services.
+    var isQuickAction: Bool { kind == "quick" }
 
     // Resilient decoder — every non-essential field gets a sensible default when
     // missing from the JSON, so hand-written / generated heart.json files don't
     // need to spell out `autoStart: false` everywhere just to satisfy Codable.
     enum CodingKeys: String, CodingKey {
-        case id, name, command, cwd, port, url, autoStart, folder, kind
+        case id, name, command, cwd, port, url, autoStart, folder, kind, icon, order
     }
 
     init(from decoder: Decoder) throws {
@@ -53,6 +66,8 @@ struct DevTask: Codable, Identifiable, Equatable, Hashable {
         self.autoStart = try c.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
         self.folder = try c.decodeIfPresent(String.self, forKey: .folder)
         self.kind = try c.decodeIfPresent(String.self, forKey: .kind)
+        self.icon = try c.decodeIfPresent(String.self, forKey: .icon)
+        self.order = try c.decodeIfPresent(Double.self, forKey: .order)
     }
 }
 

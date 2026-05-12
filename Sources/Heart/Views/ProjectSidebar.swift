@@ -32,12 +32,35 @@ struct ProjectSidebar: View {
     let onPickImport: () -> Void
     /// Create a blank task in this project (opens the edit sheet pre-filled).
     let onAddTask: () -> Void
+    /// A quick-action chip was tapped — toggle start/stop and select it for the
+    /// detail pane.
+    let onQuickTap: (DevTask) -> Void
+    /// Create a blank quick-action task (opens the edit sheet pre-filled, kind=quick).
+    let onAddQuickAction: () -> Void
+    /// Create a new folder. Argument is the parent path; empty string means
+    /// "at the project root" (callers should prepend the project name).
+    let onAddFolder: (String) -> Void
+    /// Rename a folder. Argument is the folder's absolute path.
+    let onRenameFolder: (String) -> Void
+    /// Move a task into a different folder. Second arg = new absolute path.
+    let onMoveTask: (DevTask, String) -> Void
+    /// Open the "Resume previous session…" picker for a Claude shortcut task.
+    let onResumeClaude: (DevTask) -> Void
+    /// True when the user toggled "Edit" in the toolbar. Surfaces drag handles
+    /// so tasks + folders can be reordered.
+    let editMode: Bool
+    /// True when the linked source file is out of sync with the in-memory tasks.
+    /// Drives the inline "Save" button in the SourceBar.
+    let isDirty: Bool
+    /// Save the project back to its linked source file.
+    let onSaveSource: () -> Void
 
     @State private var isDropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
             sourceBar
+            quickActionsBar
             Divider()
             List(selection: $selectedTaskId) {
                 let root = store.buildTree(forProject: project)
@@ -75,7 +98,7 @@ struct ProjectSidebar: View {
                 .font(.system(size: 10))
                 .foregroundStyle(path != nil ? Color.accentColor : .secondary)
             if let path {
-                Text(displayPath(path))
+                Text((path as NSString).lastPathComponent)
                     .font(.system(size: 10, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -86,6 +109,28 @@ struct ProjectSidebar: View {
                             [URL(fileURLWithPath: path)]
                         )
                     }
+                if isDirty {
+                    Button {
+                        onSaveSource()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "square.and.arrow.down.fill")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("Save")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.accentColor)
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Save unsaved changes to \((path as NSString).lastPathComponent)")
+                }
             } else {
                 Text("Not linked to a file · Save as… to link")
                     .font(.system(size: 10))
@@ -93,6 +138,22 @@ struct ProjectSidebar: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
+            Button {
+                onAddFolder(project)
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 10))
+                    Text("Folder")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Add a folder to '\(project)'")
             Button {
                 onAddTask()
             } label: {
@@ -116,6 +177,117 @@ struct ProjectSidebar: View {
         .background(Color.secondary.opacity(0.05))
     }
 
+    // MARK: - Quick actions bar
+
+    @ViewBuilder
+    private var quickActionsBar: some View {
+        let chips = store.quickActions(forProject: project)
+        if !chips.isEmpty || true {
+            HStack(spacing: 6) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(chips) { task in
+                            quickChip(for: task)
+                        }
+                    }
+                    .padding(.leading, 8)
+                }
+                Button {
+                    onAddQuickAction()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 9))
+                        Image(systemName: "plus")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.accentColor.opacity(0.4),
+                                    style: StrokeStyle(lineWidth: 0.8, dash: [3, 2]))
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Add a quick-action chip")
+                .padding(.trailing, 8)
+            }
+            .padding(.vertical, 5)
+            .background(Color.secondary.opacity(0.03))
+        }
+    }
+
+    @ViewBuilder
+    private func quickChip(for task: DevTask) -> some View {
+        let isRunning = processManager.status(task.id).isRunning
+        let isSelected = (selectedTaskId == task.id)
+        Button {
+            onQuickTap(task)
+        } label: {
+            HStack(spacing: 4) {
+                let hasIcon = !(task.icon ?? "").isEmpty
+                let hasName = !task.name.isEmpty
+                if hasIcon {
+                    Image(systemName: task.icon!)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(isRunning ? Color.green : Color.accentColor)
+                }
+                if hasName {
+                    Text(task.name)
+                        .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else if !hasIcon {
+                    // No identity at all — fall back to a placeholder so the
+                    // chip still has tappable bulk.
+                    Text("(unnamed)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(isRunning
+                          ? Color.green.opacity(0.18)
+                          : (isSelected ? Color.accentColor.opacity(0.18)
+                                        : Color.secondary.opacity(0.10)))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(isRunning
+                            ? Color.green.opacity(0.55)
+                            : (isSelected ? Color.accentColor.opacity(0.55)
+                                          : Color.secondary.opacity(0.20)),
+                            lineWidth: 0.5)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(task.command)
+        .contextMenu {
+            Button {
+                onQuickTap(task)
+            } label: {
+                Label(isRunning ? "Stop" : "Run", systemImage: isRunning ? "stop.fill" : "play.fill")
+            }
+            Divider()
+            Button { onEdit(task) } label: { Label("Edit…", systemImage: "pencil") }
+            Button { onDuplicate(task) } label: {
+                Label("Duplicate", systemImage: "plus.square.on.square")
+            }
+            Divider()
+            Button(role: .destructive) { onDelete(task) } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
     private func displayPath(_ path: String) -> String {
         let home = NSHomeDirectory()
         if path == home { return "~" }
@@ -127,19 +299,140 @@ struct ProjectSidebar: View {
 
     @ViewBuilder
     private func sidebarRow(task: DevTask) -> some View {
-        if task.isClaudeShortcut {
-            ClaudeShortcutRow(task: task, isSelected: selectedTaskId == task.id) {
-                selectedTaskId = task.id
+        HStack(spacing: 6) {
+            if editMode {
+                reorderStepper(
+                    canUp: canMoveTask(task, by: -1),
+                    canDown: canMoveTask(task, by: 1),
+                    moveUp: { moveTask(task, by: -1) },
+                    moveDown: { moveTask(task, by: 1) }
+                )
             }
-            .tag(task.id)
-            .contextMenu { claudeRowMenu(for: task) }
-        } else {
-            TaskRow(task: task,
-                    processManager: processManager,
-                    onShowBrowser: { onShowBrowser(task) })
-                .tag(task.id)
-                .contextMenu { rowMenu(for: task) }
+            if task.isClaudeShortcut {
+                ClaudeShortcutRow(task: task, isSelected: selectedTaskId == task.id) {
+                    selectedTaskId = task.id
+                }
+            } else {
+                TaskRow(task: task,
+                        processManager: processManager,
+                        onShowBrowser: { onShowBrowser(task) })
+            }
         }
+        .tag(task.id)
+        .contextMenu {
+            if task.isClaudeShortcut { claudeRowMenu(for: task) }
+            else { rowMenu(for: task) }
+        }
+    }
+
+    /// Pair of up/down arrows used to reorder a row in edit mode. Cleaner than
+    /// fighting List(selection:) over drag gestures.
+    @ViewBuilder
+    private func reorderStepper(canUp: Bool,
+                                canDown: Bool,
+                                moveUp: @escaping () -> Void,
+                                moveDown: @escaping () -> Void) -> some View {
+        VStack(spacing: 1) {
+            Button(action: moveUp) {
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(canUp ? Color.accentColor : Color.secondary.opacity(0.35))
+                    .frame(width: 18, height: 11)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.accentColor.opacity(canUp ? 0.10 : 0))
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(!canUp)
+            Button(action: moveDown) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(canDown ? Color.accentColor : Color.secondary.opacity(0.35))
+                    .frame(width: 18, height: 11)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.accentColor.opacity(canDown ? 0.10 : 0))
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(!canDown)
+        }
+        .frame(width: 20)
+    }
+
+    // MARK: - Reorder via up/down steppers
+
+    /// Tasks at the same direct folder, sorted by current `order` (nil last).
+    private func taskSiblings(for task: DevTask) -> [DevTask] {
+        guard let folder = task.folder else { return [] }
+        return store.tasks
+            .filter { $0.folder == folder && !$0.isQuickAction }
+            .sorted { a, b in
+                switch (a.order, b.order) {
+                case let (l?, r?): return l < r
+                case (_?, nil):    return true
+                case (nil, _?):    return false
+                case (nil, nil):
+                    return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+                }
+            }
+    }
+
+    private func canMoveTask(_ task: DevTask, by delta: Int) -> Bool {
+        let siblings = taskSiblings(for: task)
+        guard let idx = siblings.firstIndex(where: { $0.id == task.id }) else { return false }
+        let new = idx + delta
+        return new >= 0 && new < siblings.count
+    }
+
+    private func moveTask(_ task: DevTask, by delta: Int) {
+        guard let folder = task.folder else { return }
+        let siblings = taskSiblings(for: task)
+        guard let idx = siblings.firstIndex(where: { $0.id == task.id }) else { return }
+        let new = idx + delta
+        guard new >= 0 && new < siblings.count else { return }
+        var ids = siblings.map(\.id)
+        ids.swapAt(idx, new)
+        store.reorderTasks(inFolder: folder, taskIds: ids)
+    }
+
+    /// Sibling folder names sharing the same parent. Order is whatever the
+    /// stored tree currently renders (already sorted by `folderOrder`).
+    private func folderSiblings(of node: FolderNode) -> (parent: String, names: [String]) {
+        let segments = node.path.split(separator: "/").map(String.init)
+        guard !segments.isEmpty else { return ("", []) }
+        let parent = segments.dropLast().joined(separator: "/")
+        let parentNode: FolderNode = {
+            if parent.isEmpty {
+                return store.buildTree()
+            }
+            let projectTree = store.buildTree(forProject: project)
+            func walk(_ n: FolderNode) -> FolderNode? {
+                if n.path == parent { return n }
+                for s in n.subfolders { if let f = walk(s) { return f } }
+                return nil
+            }
+            return walk(projectTree) ?? FolderNode(name: "", path: parent)
+        }()
+        return (parent, parentNode.subfolders.map(\.name))
+    }
+
+    private func canMoveFolder(_ node: FolderNode, by delta: Int) -> Bool {
+        let (_, names) = folderSiblings(of: node)
+        guard let idx = names.firstIndex(of: node.name) else { return false }
+        let new = idx + delta
+        return new >= 0 && new < names.count
+    }
+
+    private func moveFolder(_ node: FolderNode, by delta: Int) {
+        let (parent, names) = folderSiblings(of: node)
+        guard let idx = names.firstIndex(of: node.name) else { return }
+        let new = idx + delta
+        guard new >= 0 && new < names.count else { return }
+        var next = names
+        next.swapAt(idx, new)
+        store.reorderSubfolders(parent: parent, names: next)
     }
 
     @ViewBuilder
@@ -154,6 +447,7 @@ struct ProjectSidebar: View {
         }
         Divider()
         Button { onEdit(task) } label: { Label("Edit…", systemImage: "pencil") }
+        moveToMenu(for: task)
         Button { onDuplicate(task) } label: {
             Label("Duplicate", systemImage: "plus.square.on.square")
         }
@@ -168,7 +462,14 @@ struct ProjectSidebar: View {
 
     @ViewBuilder
     private func claudeRowMenu(for task: DevTask) -> some View {
+        Button {
+            onResumeClaude(task)
+        } label: {
+            Label("Resume previous session…", systemImage: "clock.arrow.circlepath")
+        }
+        Divider()
         Button { onEdit(task) } label: { Label("Edit…", systemImage: "pencil") }
+        moveToMenu(for: task)
         Button { onDuplicate(task) } label: {
             Label("Duplicate", systemImage: "plus.square.on.square")
         }
@@ -176,6 +477,49 @@ struct ProjectSidebar: View {
         Button(role: .destructive) { onDelete(task) } label: {
             Label("Delete", systemImage: "trash")
         }
+    }
+
+    @ViewBuilder
+    private func moveToMenu(for task: DevTask) -> some View {
+        Menu {
+            ForEach(availableFolderPaths, id: \.self) { path in
+                Button {
+                    onMoveTask(task, path)
+                } label: {
+                    if path == project {
+                        Label("\(project) (root)", systemImage: "house")
+                    } else {
+                        let prefix = project + "/"
+                        let display = path.hasPrefix(prefix)
+                            ? String(path.dropFirst(prefix.count))
+                            : path
+                        Label(display, systemImage: "folder")
+                    }
+                }
+                .disabled((task.folder ?? "") == path)
+            }
+            Divider()
+            Button {
+                onAddFolder(project)
+            } label: {
+                Label("New folder…", systemImage: "folder.badge.plus")
+            }
+        } label: {
+            Label("Move to", systemImage: "folder")
+        }
+    }
+
+    /// Project root + every subfolder path under it. Used to populate the
+    /// per-row "Move to…" submenu.
+    private var availableFolderPaths: [String] {
+        var paths: [String] = [project]
+        let root = store.buildTree(forProject: project)
+        func walk(_ node: FolderNode) {
+            if !node.path.isEmpty { paths.append(node.path) }
+            for sub in node.subfolders { walk(sub) }
+        }
+        walk(root)
+        return paths
     }
 
     // MARK: - Folder tree
@@ -214,6 +558,14 @@ struct ProjectSidebar: View {
                               totalCount: Int,
                               allTasks: [DevTask]) -> some View {
         HStack(spacing: 12) {
+            if editMode {
+                reorderStepper(
+                    canUp: canMoveFolder(node, by: -1),
+                    canDown: canMoveFolder(node, by: 1),
+                    moveUp: { moveFolder(node, by: -1) },
+                    moveDown: { moveFolder(node, by: 1) }
+                )
+            }
             Button {
                 if collapsedFolders.contains(node.path) {
                     collapsedFolders.remove(node.path)
@@ -267,6 +619,13 @@ struct ProjectSidebar: View {
         .padding(.trailing, 6)
         .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
         .contextMenu {
+            Button { onAddFolder(node.path) } label: {
+                Label("Add subfolder…", systemImage: "folder.badge.plus")
+            }
+            Button { onRenameFolder(node.path) } label: {
+                Label("Rename folder…", systemImage: "pencil")
+            }
+            Divider()
             Button { processManager.startAll(allTasks) } label: {
                 Label("Start all", systemImage: "play.fill")
             }.disabled(!hasStartable(allTasks))
@@ -290,7 +649,10 @@ struct ProjectSidebar: View {
             }.disabled(allTasks.isEmpty)
             Divider()
             Button(role: .destructive) { onDeleteFolder(node.path) } label: {
-                Label("Delete folder (\(totalCount) tasks)", systemImage: "trash")
+                Label(totalCount == 0
+                      ? "Delete folder"
+                      : "Delete folder (\(totalCount) tasks)",
+                      systemImage: "trash")
             }
         }
     }

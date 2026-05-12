@@ -36,8 +36,8 @@ cat > "${APP}/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>app.heart.launcher</string>
   <key>CFBundleName</key><string>Heart</string>
   <key>CFBundleDisplayName</key><string>Heart</string>
-  <key>CFBundleVersion</key><string>1.0</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>1.5</string>
+  <key>CFBundleShortVersionString</key><string>1.5</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
@@ -48,6 +48,10 @@ cat > "${APP}/Contents/Info.plist" <<'PLIST'
   <dict>
     <key>NSAllowsArbitraryLoads</key><true/>
   </dict>
+  <key>NSCameraUsageDescription</key>
+  <string>Heart's built-in browser needs camera access so web pages running locally (e.g. video calls, WebRTC demos) can use navigator.mediaDevices.getUserMedia().</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Heart's built-in browser needs microphone access so web pages running locally (e.g. video calls, voice-input demos) can use navigator.mediaDevices.getUserMedia().</string>
 </dict>
 </plist>
 PLIST

@@ -104,7 +104,7 @@ struct JSONFormatHelp: View {
                 fieldRow("autoStart", "boolean", required: false,
                          desc: "Reserved — saved but not yet acted upon at launch time.")
                 fieldRow("kind", "string", required: false,
-                         desc: "Set to \"claude\" to pin this task at the top of the sidebar as a multi-session Claude shortcut.")
+                         desc: "Behavior tag. \"claude\" pins the task at the top of the sidebar as a multi-session shortcut. \"quick\" surfaces it as a chip above the sidebar — one-shot run, no port / URL / status indicator. Omit (nil) for a regular long-running service.")
             }
         }
     }

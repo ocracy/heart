@@ -146,8 +146,10 @@ struct SettingsView: View {
         do {
             let tasks = try JSONDecoder().decode([DevTask].self, from: data)
             let cleaned = tasks.filter {
-                !$0.name.trimmingCharacters(in: .whitespaces).isEmpty &&
-                !$0.command.trimmingCharacters(in: .whitespaces).isEmpty
+                let hasIdentity = !$0.name.trimmingCharacters(in: .whitespaces).isEmpty
+                    || !(($0.icon ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
+                let hasCommand = !$0.command.trimmingCharacters(in: .whitespaces).isEmpty
+                return hasIdentity && hasCommand
             }
             return (cleaned, nil)
         } catch let DecodingError.dataCorrupted(ctx) {

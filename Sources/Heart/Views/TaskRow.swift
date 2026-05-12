@@ -15,9 +15,16 @@ struct TaskRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(task.name)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
+                    if let icon = task.icon, !icon.isEmpty {
+                        Image(systemName: icon)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    if !task.name.isEmpty {
+                        Text(task.name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
+                    }
                     if let port = task.port {
                         // verbatim: avoid Turkish-locale grouping like "8 000" / "8.000"
                         Text(verbatim: ":\(port)")
@@ -42,14 +49,6 @@ struct TaskRow: View {
                                tint: .blue,
                                help: "Open URL in built-in browser") {
                         onShowBrowser()
-                    }
-                }
-
-                if let port = task.port {
-                    iconButton(systemName: "bolt.slash.fill",
-                               tint: .orange,
-                               help: "Kill process on :" + String(port)) {
-                        processManager.killPort(port, for: task.id)
                     }
                 }
 

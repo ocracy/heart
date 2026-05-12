@@ -33,12 +33,24 @@ final class TaskStore: ObservableObject {
     /// New projects get appended; projects that exist in `tasks` but not here are
     /// auto-appended on read (see `orderedProjects`).
     @Published var projectOrder: [String] = []
+    /// Folder paths the user explicitly created via the UI (Add folder…). Needed
+    /// because the folder tree is otherwise derived from task `folder` values —
+    /// so an empty folder (no tasks under it) would simply not render. Storing
+    /// the path here keeps the empty folder visible until the user deletes it.
+    @Published var rememberedFolders: Set<String> = []
+    /// Manual ordering of subfolders under a parent path. Keyed by parent path
+    /// (project name for top-level folders, parent absolute path for nested).
+    /// Value is the ordered list of immediate child folder names. Missing keys
+    /// fall back to alphabetical / insertion order.
+    @Published var folderOrder: [String: [String]] = [:]
 
     static let defaultProjectName = "Project 1"
 
     private let fileURL: URL
     private let sourcesURL: URL
     private let projectsURL: URL
+    private let foldersURL: URL
+    private let folderOrderURL: URL
 
     init() {
         let fm = FileManager.default
@@ -50,6 +62,8 @@ final class TaskStore: ObservableObject {
         self.fileURL = dir.appendingPathComponent("tasks.json")
         self.sourcesURL = dir.appendingPathComponent("sources.json")
         self.projectsURL = dir.appendingPathComponent("projects.json")
+        self.foldersURL = dir.appendingPathComponent("folders.json")
+        self.folderOrderURL = dir.appendingPathComponent("folder-order.json")
 
         // One-time migration: if Heart's tasks.json doesn't exist yet but the legacy
         // Stoker config does, copy it over so users keep their setup after the rename.
@@ -65,6 +79,8 @@ final class TaskStore: ObservableObject {
         load()
         loadSources()
         loadProjectOrder()
+        loadRememberedFolders()
+        loadFolderOrder()
         // Folders are required — anything inherited from an older version with
         // `folder: nil` lands under "Project 1" so it shows up in a tab.
         migrateNilFolders()
@@ -116,6 +132,44 @@ final class TaskStore: ObservableObject {
             try data.write(to: projectsURL, options: .atomic)
         } catch {
             NSLog("[TaskStore] saveProjectOrder failed: %@", "\(error)")
+        }
+    }
+
+    private func loadFolderOrder() {
+        guard let data = try? Data(contentsOf: folderOrderURL),
+              let decoded = try? JSONDecoder().decode([String: [String]].self, from: data) else {
+            return
+        }
+        self.folderOrder = decoded
+    }
+
+    private func saveFolderOrder() {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(folderOrder)
+            try data.write(to: folderOrderURL, options: .atomic)
+        } catch {
+            NSLog("[TaskStore] saveFolderOrder failed: %@", "\(error)")
+        }
+    }
+
+    private func loadRememberedFolders() {
+        guard let data = try? Data(contentsOf: foldersURL),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return
+        }
+        self.rememberedFolders = Set(decoded)
+    }
+
+    private func saveRememberedFolders() {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(rememberedFolders.sorted())
+            try data.write(to: foldersURL, options: .atomic)
+        } catch {
+            NSLog("[TaskStore] saveRememberedFolders failed: %@", "\(error)")
         }
     }
 
@@ -232,6 +286,14 @@ final class TaskStore: ObservableObject {
         if bundleSources.removeValue(forKey: path) != nil {
             saveSources()
         }
+        // Drop the folder itself + every subfolder from the remembered set.
+        let before = rememberedFolders.count
+        rememberedFolders = rememberedFolders.filter {
+            !($0 == path || $0.hasPrefix(prefix))
+        }
+        if rememberedFolders.count != before {
+            saveRememberedFolders()
+        }
         // If we just deleted a whole project, drop it from the tab order too.
         if topLevelSegment(of: path) == path,
            let idx = projectOrder.firstIndex(of: path) {
@@ -253,9 +315,43 @@ final class TaskStore: ObservableObject {
     /// tree alongside regular tasks (so they get scoped under each imported bundle's folder),
     /// but render with a different row style.
     /// `folder` values may be slash-separated paths (e.g. "Maatrics/Frontend") for nesting.
+    /// Empty folders that the user created via "Add folder" are also rendered (see
+    /// `rememberedFolders`).
     func buildTree() -> FolderNode {
+        buildTreeBase(includeQuickActions: true)
+    }
+
+    /// Sub-tree of a single project — the project name is the implicit root
+    /// (returned node has `name == project`, `path == project`).
+    /// Quick-action tasks are filtered out here because they're surfaced as chips
+    /// above the sidebar, not as rows inside it.
+    func buildTree(forProject project: String) -> FolderNode {
+        let full = buildTreeExcludingQuickActions()
+        if let match = full.subfolders.first(where: { $0.name == project }) {
+            return match
+        }
+        return FolderNode(name: project, path: project)
+    }
+
+    /// All quick-action tasks belonging to a project (top-level + nested folders).
+    func quickActions(forProject project: String) -> [DevTask] {
+        tasksUnder(project: project).filter { $0.isQuickAction }
+    }
+
+    /// Variant of `buildTree` used by per-project sidebar rendering — keeps the
+    /// nesting logic identical but skips quick-action tasks.
+    private func buildTreeExcludingQuickActions() -> FolderNode {
+        buildTreeBase(includeQuickActions: false)
+    }
+
+    private func buildTreeBase(includeQuickActions: Bool) -> FolderNode {
         let root = FolderNode(name: "", path: "")
-        for task in tasks {
+        // Seed the tree with explicitly-created empty folders first, so they
+        // render even when no tasks are inside them yet.
+        for path in rememberedFolders {
+            ensurePath(path, in: root)
+        }
+        for task in tasks where includeQuickActions || !task.isQuickAction {
             let raw = task.folder?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? ""
@@ -263,31 +359,155 @@ final class TaskStore: ObservableObject {
                 root.tasks.append(task)
                 continue
             }
-            let segments = raw.split(separator: "/").map(String.init)
-            var current = root
-            for (index, segment) in segments.enumerated() {
-                let path = segments[0...index].joined(separator: "/")
-                if let existing = current.subfolders.first(where: { $0.name == segment }) {
-                    current = existing
-                } else {
-                    let node = FolderNode(name: segment, path: path)
-                    current.subfolders.append(node)
-                    current = node
-                }
-            }
-            current.tasks.append(task)
+            let node = ensurePath(raw, in: root)
+            node.tasks.append(task)
         }
+        sortTree(root)
         return root
     }
 
-    /// Sub-tree of a single project — the project name is the implicit root
-    /// (returned node has `name == project`, `path == project`).
-    func buildTree(forProject project: String) -> FolderNode {
-        let full = buildTree()
-        if let match = full.subfolders.first(where: { $0.name == project }) {
-            return match
+    /// Sort every subfolder list against `folderOrder` and every task list
+    /// against `task.order`. Both fall back to insertion / alphabetical when
+    /// the user hasn't manually reordered.
+    private func sortTree(_ node: FolderNode) {
+        let ordering = folderOrder[node.path] ?? []
+        node.subfolders.sort { a, b in
+            let ai = ordering.firstIndex(of: a.name)
+            let bi = ordering.firstIndex(of: b.name)
+            switch (ai, bi) {
+            case let (l?, r?): return l < r
+            case (_?, nil):    return true   // explicitly-ordered first
+            case (nil, _?):    return false
+            case (nil, nil):   return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            }
         }
-        return FolderNode(name: project, path: project)
+        node.tasks.sort { a, b in
+            switch (a.order, b.order) {
+            case let (l?, r?): return l < r
+            case (_?, nil):    return true
+            case (nil, _?):    return false
+            case (nil, nil):   return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            }
+        }
+        for sub in node.subfolders { sortTree(sub) }
+    }
+
+    // MARK: - Reorder API
+
+    /// Persist a new order for the subfolders directly under `parent`. The list
+    /// is the ordered child folder names (not full paths).
+    func reorderSubfolders(parent: String, names: [String]) {
+        folderOrder[parent] = names
+        saveFolderOrder()
+        objectWillChange.send()
+    }
+
+    /// Persist a new order for the tasks directly under `folder`. Assigns a
+    /// numeric `order` value spaced out so future inserts don't require
+    /// renumbering. `taskIds` should be the IDs in their new desired order.
+    func reorderTasks(inFolder folder: String, taskIds: [String]) {
+        let stride: Double = 100
+        for (idx, id) in taskIds.enumerated() {
+            guard let i = tasks.firstIndex(where: { $0.id == id }) else { continue }
+            tasks[i].order = Double(idx + 1) * stride
+        }
+        save()
+    }
+
+    /// Walks (and lazily extends) the folder tree so that the path exists.
+    /// Returns the deepest node along that path.
+    @discardableResult
+    private func ensurePath(_ rawPath: String, in root: FolderNode) -> FolderNode {
+        let segments = rawPath.split(separator: "/").map(String.init)
+        var current = root
+        for (index, segment) in segments.enumerated() {
+            let path = segments[0...index].joined(separator: "/")
+            if let existing = current.subfolders.first(where: { $0.name == segment }) {
+                current = existing
+            } else {
+                let node = FolderNode(name: segment, path: path)
+                current.subfolders.append(node)
+                current = node
+            }
+        }
+        return current
+    }
+
+    // MARK: - Folder mutation API
+
+    /// Create an empty folder at the given absolute path (e.g. "MyProject/Backend").
+    /// No-op if the path already exists. The folder is persisted so it stays in
+    /// the tree even when no tasks live under it yet.
+    func addFolder(path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmed.isEmpty else { return }
+        if rememberedFolders.insert(trimmed).inserted {
+            saveRememberedFolders()
+        }
+        // If this folder is at the top level it also implies a project — make
+        // sure the tab order picks it up.
+        if let project = topLevelSegment(of: trimmed) {
+            ensureProjectInOrder(project)
+        }
+        objectWillChange.send()
+    }
+
+    /// Rename a folder (and every nested folder underneath it). Tasks whose
+    /// `folder` starts with the old prefix are rewritten in place. Returns the
+    /// final new path (de-duplicated against existing siblings).
+    @discardableResult
+    func renameFolder(oldPath: String, newPath: String) -> String {
+        let oldTrimmed = oldPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let newTrimmed = newPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !oldTrimmed.isEmpty, !newTrimmed.isEmpty, oldTrimmed != newTrimmed else {
+            return oldTrimmed
+        }
+        // If oldPath is a top-level project, route through renameProject so
+        // bundleSources keys + projectOrder also get updated.
+        if topLevelSegment(of: oldTrimmed) == oldTrimmed {
+            return renameProject(oldTrimmed, to: newTrimmed)
+        }
+
+        let oldPrefix = oldTrimmed + "/"
+        // Rewrite task folder prefixes.
+        for idx in tasks.indices {
+            guard let f = tasks[idx].folder else { continue }
+            if f == oldTrimmed {
+                tasks[idx].folder = newTrimmed
+            } else if f.hasPrefix(oldPrefix) {
+                tasks[idx].folder = newTrimmed + "/" + f.dropFirst(oldPrefix.count)
+            }
+        }
+        // Rewrite remembered folder entries.
+        let updated: Set<String> = Set(rememberedFolders.map { path -> String in
+            if path == oldTrimmed { return newTrimmed }
+            if path.hasPrefix(oldPrefix) {
+                return newTrimmed + "/" + path.dropFirst(oldPrefix.count)
+            }
+            return path
+        })
+        if updated != rememberedFolders {
+            rememberedFolders = updated
+            saveRememberedFolders()
+        }
+        save()
+        return newTrimmed
+    }
+
+    /// Move a task into a different folder (absolute path, e.g.
+    /// "MyProject/Backend/Workers"). Empty `newFolder` puts it at the project
+    /// root — but callers should always pass the project name as the prefix
+    /// since folder=nil isn't a valid state anymore.
+    func moveTask(id: String, toFolder newFolder: String) {
+        let trimmed = newFolder.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let idx = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[idx].folder = trimmed.isEmpty ? nil : trimmed
+        save()
+        syncProjectOrder()
     }
 
     var configPath: String { fileURL.path }
@@ -385,15 +605,61 @@ final class TaskStore: ObservableObject {
     }
 
     /// Replace all tasks of a project with a fresh set decoded from JSON. Used by
-    /// drop-into-project. Source URL is remembered so subsequent "Save" writes back.
+    /// drop-into-project. The whole swap is done as a single mutation of `tasks`
+    /// so SwiftUI doesn't render an intermediate state where the old tasks are
+    /// gone but the new ones aren't in yet — that flash was causing the
+    /// sidebar to look "broken until restart" after a drop.
+    /// Source URL is remembered so subsequent "Save" writes back.
     func replaceProject(_ name: String, with newTasks: [DevTask], source: URL?) {
-        removeFolder(path: name)
-        append(newTasks, folder: name)
-        if let source {
-            setBundleSource(folder: name, path: source.path)
+        let prefix = name + "/"
+        // Drop the current project's tasks, keep everything else.
+        var nextTasks = tasks.filter { task in
+            guard let folder = task.folder else { return true }
+            return !(folder == name || folder.hasPrefix(prefix))
         }
-        // removeFolder may have dropped the project from the order — re-add at the end.
+        // Resolve folder paths + dedupe IDs against the surviving set.
+        var seenIds = Set(nextTasks.map(\.id))
+        for incoming in newTasks {
+            var t = incoming
+            let inner = t.folder?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if let inner, !inner.isEmpty {
+                t.folder = "\(name)/\(inner)"
+            } else {
+                t.folder = name
+            }
+            var id = t.id
+            var bump = 2
+            while seenIds.contains(id) {
+                id = "\(t.id)-\(bump)"
+                bump += 1
+            }
+            t.id = id
+            seenIds.insert(id)
+            nextTasks.append(t)
+        }
+        // Single publish — bundleSources, rememberedFolders, projectOrder side
+        // effects come after so the @Published `tasks` swap is what SwiftUI
+        // reacts to first.
+        tasks = nextTasks
+
+        // Drop remembered folder entries for the old contents (the dropped
+        // bundle may have a different folder tree).
+        let beforeCount = rememberedFolders.count
+        rememberedFolders = rememberedFolders.filter { path in
+            !(path == name || path.hasPrefix(prefix))
+        }
+        if rememberedFolders.count != beforeCount {
+            saveRememberedFolders()
+        }
+
+        if let source {
+            bundleSources[name] = source.path
+            saveSources()
+        }
         ensureProjectInOrder(name)
+        save()
     }
 
     func unlinkSource(project: String) {

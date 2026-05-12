@@ -10,16 +10,18 @@ struct ClaudeShortcutRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "sparkles")
+            Image(systemName: task.icon ?? "sparkles")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.purple)
                 .frame(width: 10, alignment: .center)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(task.name)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
+                    if !task.name.isEmpty {
+                        Text(task.name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
+                    }
                     Text("CLAUDE")
                         .font(.system(size: 9, weight: .bold))
                         .tracking(0.5)
