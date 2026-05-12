@@ -49,6 +49,65 @@ command fires, its output streams into the terminal, and the user can stop
 it or just walk away. Pick 1–3 per project that the user reaches for most
 often (formatters, cache busters, migrations, codegen, install, …).
 
+## Picking icons
+
+`icon` is an SF Symbol name. Heart renders it next to the task `name` in the
+sidebar / chip / Claude row. The right icon makes a 12-task project
+scannable in one glance — wrong icons (or missing ones) make every row look
+the same. Pick one per task.
+
+### Rules
+
+1. **Use only real SF Symbols.** Heart targets macOS 13+ (SF Symbols 4 baseline). If you're unsure a name is valid, fall back to a safer one from the list below — Heart silently renders nothing when the name is invalid, which is worse than a generic but real icon.
+2. **Lowercase, dotted naming.** SF Symbol names are dot-separated, all lowercase: `arrow.triangle.2.circlepath`, `tray.full.fill`, `chart.line.uptrend.xyaxis`. No camelCase, no underscores, no spaces.
+3. **Prefer `.fill` variants for chips and busy sidebars** — they read better at small sizes (`folder.fill` > `folder`, `bolt.fill` > `bolt`).
+4. **Match the task's job, not its tech stack.** A queue worker is `tray.full.fill` regardless of whether it's Sidekiq / Horizon / Celery. A formatter is `paintbrush.fill` regardless of language.
+5. **Quick actions get expressive icons.** Chip space is tight; the icon does the heavy lifting. Migrations → `arrow.triangle.2.circlepath`, cache busts → `trash`, builds → `hammer.fill`.
+6. **Never invent icon names.** If you can't find a clean match in the table below, omit `icon` — the row will fall back to its kind's default style (status dot / sparkles).
+
+### Recommended icons by task
+
+| Task                            | Icon                              |
+|---------------------------------|-----------------------------------|
+| Web frontend (Vite/Next/Astro)  | `globe` or `safari.fill`          |
+| Admin / dashboard frontend      | `chart.bar.fill`                  |
+| HTTP API / backend server       | `server.rack`                     |
+| GraphQL server                  | `point.3.connected.trianglepath.dotted` |
+| Websocket / realtime server     | `antenna.radiowaves.left.and.right` |
+| Queue worker (Horizon, Sidekiq, Celery) | `tray.full.fill`          |
+| Cron / scheduler                | `clock.fill`                      |
+| Database (Postgres, MySQL)      | `cylinder.split.1x2`              |
+| Redis / cache server            | `bolt.horizontal.circle.fill`     |
+| Message broker (RabbitMQ, Kafka)| `arrow.triangle.swap`             |
+| Object storage emulator (Minio) | `externaldrive.fill`              |
+| Mail catcher (Mailpit, MailHog) | `envelope.fill`                   |
+| Search index (Meilisearch, ES)  | `magnifyingglass`                 |
+| Docker compose                  | `shippingbox.fill`                |
+| ngrok / tunnel                  | `network`                         |
+| Mobile dev server (Expo, Metro) | `iphone`                          |
+| Claude Code shortcut            | `sparkles` (default, can omit)    |
+
+### Recommended icons by quick action
+
+| Quick action                | Icon                                |
+|-----------------------------|-------------------------------------|
+| Install / npm install       | `shippingbox.fill`                  |
+| Build / compile             | `hammer.fill`                       |
+| Migrate / schema sync       | `arrow.triangle.2.circlepath`       |
+| Seed database               | `leaf.fill`                         |
+| Cache clear / optimize:clear| `trash`                             |
+| Optimize / warm caches      | `bolt.fill`                         |
+| Format / prettier           | `paintbrush.fill`                   |
+| Lint                        | `checkmark.seal.fill`               |
+| Run tests                   | `checkmark.circle.fill`             |
+| Typecheck                   | `chevron.left.forwardslash.chevron.right` |
+| Generate types / codegen    | `curlybraces`                       |
+| Collect static / assets     | `tray.and.arrow.down.fill`          |
+| Docker down / stop          | `stop.fill`                         |
+| Restart / reload            | `arrow.clockwise`                   |
+| Open URL in browser         | `safari.fill`                       |
+| Open repo in editor         | `chevron.left.forwardslash.chevron.right` |
+
 ## Detection rules
 
 Walk the project at most **3 directory levels deep** unless the layout is clearly a monorepo (`pnpm-workspace.yaml`, `turbo.json`, `lerna.json`, `nx.json`, `apps/`, `packages/`, `services/`). For each detected service, register **one task**.
@@ -263,6 +322,7 @@ of this skill is to surface the ones the project explicitly opted into.
 - Don't include secrets, tokens, or env values inline in `command`.
 - Don't set `autoStart` (reserved, not yet implemented).
 - Don't generate tasks for tooling Heart already provides (terminal, browser, etc).
+- Don't invent SF Symbol names. Stick to names from the "Picking icons" tables above (they're verified against the SF Symbols 4 catalog Heart targets). If nothing fits, omit `icon` — wrong / nonexistent names render as a blank space, which looks worse than no icon.
 
 ## Output formatting
 
@@ -299,6 +359,7 @@ Output `~/projects/my-shop/heart.json`:
       "command": "php artisan serve",
       "cwd": "~/projects/my-shop/api",
       "folder": "Backend",
+      "icon": "server.rack",
       "port": 8000,
       "url": "http://localhost:8000"
     },
@@ -308,6 +369,7 @@ Output `~/projects/my-shop/heart.json`:
       "command": "npm run dev",
       "cwd": "~/projects/my-shop/web",
       "folder": "Frontend",
+      "icon": "globe",
       "port": 5173,
       "url": "http://localhost:5173"
     },
@@ -317,6 +379,7 @@ Output `~/projects/my-shop/heart.json`:
       "command": "npm run dev",
       "cwd": "~/projects/my-shop/admin",
       "folder": "Frontend",
+      "icon": "chart.bar.fill",
       "port": 3000,
       "url": "http://localhost:3000"
     },
