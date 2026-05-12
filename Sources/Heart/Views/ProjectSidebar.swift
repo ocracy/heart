@@ -312,6 +312,15 @@ struct ProjectSidebar: View {
                 ClaudeShortcutRow(task: task, isSelected: selectedTaskId == task.id) {
                     selectedTaskId = task.id
                 }
+            } else if task.isShortcut {
+                ShortcutRow(task: task,
+                            isSelected: selectedTaskId == task.id,
+                            processManager: processManager) {
+                    if !processManager.status(task.id).isRunning {
+                        processManager.start(task)
+                    }
+                    selectedTaskId = task.id
+                }
             } else {
                 TaskRow(task: task,
                         processManager: processManager,
@@ -321,6 +330,7 @@ struct ProjectSidebar: View {
         .tag(task.id)
         .contextMenu {
             if task.isClaudeShortcut { claudeRowMenu(for: task) }
+            else if task.isShortcut { shortcutRowMenu(for: task) }
             else { rowMenu(for: task) }
         }
     }
@@ -453,6 +463,34 @@ struct ProjectSidebar: View {
         }
         Button { onOpenClaudeHere(task) } label: {
             Label("Open Claude Here", systemImage: "sparkles")
+        }
+        Divider()
+        Button(role: .destructive) { onDelete(task) } label: {
+            Label("Delete", systemImage: "trash")
+        }
+    }
+
+    @ViewBuilder
+    private func shortcutRowMenu(for task: DevTask) -> some View {
+        let isRunning = processManager.status(task.id).isRunning
+        Button {
+            if isRunning {
+                processManager.stop(task)
+            } else {
+                processManager.start(task)
+            }
+        } label: {
+            Label(isRunning ? "Stop" : "Run",
+                  systemImage: isRunning ? "stop.fill" : "play.fill")
+        }
+        Button { processManager.restart(task) } label: {
+            Label("Restart", systemImage: "arrow.clockwise")
+        }
+        Divider()
+        Button { onEdit(task) } label: { Label("Edit…", systemImage: "pencil") }
+        moveToMenu(for: task)
+        Button { onDuplicate(task) } label: {
+            Label("Duplicate", systemImage: "plus.square.on.square")
         }
         Divider()
         Button(role: .destructive) { onDelete(task) } label: {

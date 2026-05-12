@@ -1218,26 +1218,30 @@ struct EditTaskSheet: View {
     @State private var showIconPicker: Bool = false
 
     enum TaskKind: String, CaseIterable, Identifiable {
-        case service, claude, quick
+        case service, shortcut, claude, quick
         var id: String { rawValue }
         var label: String {
             switch self {
-            case .service: return "Service"
-            case .claude:  return "Claude"
-            case .quick:   return "Quick"
+            case .service:  return "Service"
+            case .shortcut: return "Shortcut"
+            case .claude:   return "Claude"
+            case .quick:    return "Quick"
             }
         }
         var iconName: String {
             switch self {
-            case .service: return "server.rack"
-            case .claude:  return "sparkles"
-            case .quick:   return "bolt.fill"
+            case .service:  return "server.rack"
+            case .shortcut: return "arrow.right.circle.fill"
+            case .claude:   return "sparkles"
+            case .quick:    return "bolt.fill"
             }
         }
         var detail: String {
             switch self {
             case .service:
                 return "Long-running process. Manual start/stop, status indicator, runs in its own terminal."
+            case .shortcut:
+                return "Generic launcher (ssh, kubectl, scp, custom REPLs). Sits in the sidebar with no play/stop buttons — clicking the row runs the command and shows its terminal. No port / URL config."
             case .claude:
                 return "Pinned at the top of the sidebar. Each click opens a fresh terminal session — good for keeping multiple Claude chats in the same dir."
             case .quick:
@@ -1258,7 +1262,8 @@ struct EditTaskSheet: View {
         _folder = State(initialValue: task.folder ?? "")
         _autoStart = State(initialValue: task.autoStart)
         let initialKind: TaskKind = task.isClaudeShortcut ? .claude
-            : (task.isQuickAction ? .quick : .service)
+            : (task.isQuickAction ? .quick
+               : (task.isShortcut ? .shortcut : .service))
         _taskKind = State(initialValue: initialKind)
         _icon = State(initialValue: task.icon)
     }
@@ -1578,9 +1583,10 @@ struct EditTaskSheet: View {
         let port: Int? = Int(portText.trimmingCharacters(in: .whitespaces))
         let kindString: String? = {
             switch taskKind {
-            case .service: return nil
-            case .claude:  return "claude"
-            case .quick:   return "quick"
+            case .service:  return nil
+            case .shortcut: return "shortcut"
+            case .claude:   return "claude"
+            case .quick:    return "quick"
             }
         }()
         // Port / URL only apply to long-running services — strip them on the

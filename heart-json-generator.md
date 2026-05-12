@@ -30,18 +30,26 @@ Write **one file** at the project root: `heart.json`. Use the bundle shape:
 | `url`    | string              | when the service has an HTTP UI worth previewing                                     |
 | `folder` | string              | sidebar nesting; slash-separated: `Backend/Workers`                                  |
 | `icon`   | string              | optional SF Symbol name (e.g. `bolt.fill`, `database`, `globe`) shown next to `name` |
-| `kind`   | "claude" \| "quick" | special task types — see below                                                       |
+| `kind`   | "claude" \| "shortcut" \| "quick" | special task types — see below                                         |
 
 ### Task kinds
 
-There are three kinds of tasks Heart understands. Choose the right one — the
+There are four kinds of tasks Heart understands. Choose the right one — the
 UI surfaces each differently.
 
-| `kind`     | What it is                                              | Lives in the sidebar as…                                       |
-|------------|---------------------------------------------------------|----------------------------------------------------------------|
-| *(unset)*  | Long-running service. Manual start/stop, status dot.    | Regular row with play/stop/restart buttons + port + URL chips. |
-| `"claude"` | Claude Code shortcut. Multi-session, fresh terminal.    | Sparkles row pinned at the top of the sidebar.                 |
-| `"quick"`  | One-shot command (build, clean, migrate, etc.).         | Compact chip above the sidebar — one click runs, one click stops, output appears in the detail pane. |
+| `kind`        | What it is                                                          | Lives in the sidebar as…                                                                             |
+|---------------|---------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
+| *(unset)*     | Long-running service. Manual start/stop, status dot.                | Regular row with play/stop/restart buttons + port + URL chips.                                       |
+| `"shortcut"`  | Generic command launcher — ssh, kubectl, scp, REPLs, log tailers.   | Plain row with **no play/stop buttons**. Clicking it runs the command and shows its terminal.        |
+| `"claude"`    | Claude Code shortcut. Multi-session, fresh terminal.                | Sparkles row pinned at the top of the sidebar.                                                       |
+| `"quick"`     | One-shot command (build, clean, migrate, etc.).                     | Compact chip above the sidebar — one click runs, one click stops, output appears in the detail pane. |
+
+**Shortcuts** are clickable rows that launch a command in a fresh terminal
+without the play/stop chrome. Use them for commands the user runs by name
+but doesn't manage as a "service": SSH into a server, drop into a remote
+kubectl context, scp a build artifact, open a database shell, tail a log.
+They live alongside services in the sidebar; the row's icon + name + the
+command preview is the affordance.
 
 **Quick actions** are the place to put commands a developer runs **on demand**
 — not all the time. They have no port, no URL, no auto-readiness check; the
@@ -86,6 +94,11 @@ the same. Pick one per task.
 | ngrok / tunnel                  | `network`                         |
 | Mobile dev server (Expo, Metro) | `iphone`                          |
 | Claude Code shortcut            | `sparkles` (default, can omit)    |
+| SSH shortcut                    | `terminal`                        |
+| kubectl context                 | `helm`                            |
+| Database shell (psql, mysql)    | `cylinder.split.1x2`              |
+| Remote / production endpoint    | `bolt.horizontal.fill`            |
+| Log tail (heroku logs, kubectl logs) | `text.alignleft`             |
 
 ### Recommended icons by quick action
 
@@ -153,6 +166,48 @@ For each `package.json`:
 - **redis** / **postgres** with config files at the repo root (`redis.conf`, `postgresql.conf`) → register `redis-server` / `postgres -D ./pgdata`.
 - **Mailpit / MailHog / Mailcatcher**: include if config references it.
 - **ngrok**: if `ngrok` is configured (e.g. `ngrok.yml` or a known wrapper command), include it with `url: "http://localhost:4040"` (the inspector UI).
+
+### Shortcuts
+
+Only emit shortcuts when the project has obvious external endpoints the
+developer interacts with by name. Don't invent SSH hosts — only register
+shortcuts you can derive from real config.
+
+Common signals:
+
+- **`Makefile` targets named like `ssh`, `console`, `shell`, `dbshell`,
+  `prod-shell`** → register one shortcut per real target, e.g.
+  `make ssh-prod`.
+- **`docker-compose.yml` services with an obvious shell entrypoint**
+  (php-fpm, redis, postgres) → optional `docker compose exec <svc> sh`
+  shortcut named `<Svc> shell`.
+- **`kubectl` config + named contexts in `kubeconfig`** → one shortcut per
+  context: `kubectl --context <name>`.
+- **A `.deploy/`, `infra/`, or `scripts/ssh-*.sh` directory with ssh
+  helper scripts** → one shortcut per helper.
+- **`mysql.cnf` / `pgservice.conf` with a named host** → `mysql -h <host>`
+  or `psql service=<name>` shortcut.
+
+Shape:
+
+```json
+{
+  "id": "ssh-prod",
+  "name": "Prod SSH",
+  "command": "ssh deploy@my-shop.com",
+  "cwd": "<repo-root>",
+  "folder": "Ops",
+  "icon": "terminal",
+  "kind": "shortcut"
+}
+```
+
+Place shortcuts in a dedicated `folder: "Ops"` (or similar) if you have
+more than one — they're conceptually different from the running services.
+
+If nothing in the repo points to a real remote host, **don't emit
+shortcuts at all**. A made-up `ssh user@server` is worse than the user
+adding their own.
 
 ### Quick actions
 

@@ -47,6 +47,11 @@ struct DevTask: Codable, Identifiable, Equatable, Hashable {
     /// shows its output in the detail pane; no on/off status indicator in the
     /// sidebar because they aren't long-lived services.
     var isQuickAction: Bool { kind == "quick" }
+    /// Generic launcher — like a Claude shortcut but the command is arbitrary
+    /// (ssh, kubectl, scp, log tailers, REPLs…). Sidebar row has no play/stop
+    /// buttons; clicking starts the command if it isn't already running and
+    /// selects the row so its terminal fills the detail pane.
+    var isShortcut: Bool { kind == "shortcut" }
 
     // Resilient decoder — every non-essential field gets a sensible default when
     // missing from the JSON, so hand-written / generated heart.json files don't
