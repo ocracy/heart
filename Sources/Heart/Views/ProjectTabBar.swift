@@ -198,15 +198,15 @@ struct ProjectTabBar: View {
     @ViewBuilder
     private var addButton: some View {
         Menu {
+            Button { onShowFormatHelp() } label: {
+                Label("Generate with Claude…", systemImage: "sparkles")
+            }
+            Divider()
             Button { onPickFile() } label: {
                 Label("Import from JSON…", systemImage: "square.and.arrow.down")
             }
             Button { onCreateEmpty() } label: {
                 Label("Empty project", systemImage: "folder.badge.plus")
-            }
-            Divider()
-            Button { onShowFormatHelp() } label: {
-                Label("JSON format help…", systemImage: "questionmark.circle")
             }
         } label: {
             HStack(spacing: 4) {

@@ -36,8 +36,8 @@ cat > "${APP}/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>app.heart.launcher</string>
   <key>CFBundleName</key><string>Heart</string>
   <key>CFBundleDisplayName</key><string>Heart</string>
-  <key>CFBundleVersion</key><string>1.6</string>
-  <key>CFBundleShortVersionString</key><string>1.6</string>
+  <key>CFBundleVersion</key><string>1.7</string>
+  <key>CFBundleShortVersionString</key><string>1.7</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>

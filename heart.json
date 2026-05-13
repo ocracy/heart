@@ -1,0 +1,57 @@
+{
+  "name": "Heart",
+  "tasks": [
+    {
+      "id": "build",
+      "name": "Build",
+      "command": "swift build",
+      "cwd": "~/www/stoker",
+      "folder": "Dev",
+      "icon": "hammer.fill",
+      "kind": "quick"
+    },
+    {
+      "id": "run",
+      "name": "Run",
+      "command": "swift run Heart",
+      "cwd": "~/www/stoker",
+      "folder": "Dev",
+      "icon": "play.fill",
+      "kind": "quick"
+    },
+    {
+      "id": "install",
+      "name": "Install",
+      "command": "./install.sh",
+      "cwd": "~/www/stoker",
+      "folder": "Dev",
+      "icon": "tray.and.arrow.down.fill",
+      "kind": "quick"
+    },
+    {
+      "id": "dist",
+      "name": "Dist",
+      "command": "./dist.sh",
+      "cwd": "~/www/stoker",
+      "folder": "Dev",
+      "icon": "archivebox.fill",
+      "kind": "quick"
+    },
+    {
+      "id": "clean",
+      "name": "Clean",
+      "command": "swift package clean",
+      "cwd": "~/www/stoker",
+      "folder": "Dev",
+      "icon": "trash",
+      "kind": "quick"
+    },
+    {
+      "id": "claude-root",
+      "name": "Claude (heart)",
+      "command": "claude",
+      "cwd": "~/www/stoker",
+      "kind": "claude"
+    }
+  ]
+}

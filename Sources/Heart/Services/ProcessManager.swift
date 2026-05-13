@@ -11,6 +11,17 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
     private var pendingRestart: [String: DevTask] = [:]
     private var keyMonitor: Any?
 
+    /// User's interactive-login-shell PATH, snapshotted once. macOS launchd
+    /// hands GUI apps a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), so
+    /// without this, anything installed by Homebrew, pnpm/Volta/mise/asdf,
+    /// or hand-placed in `~/usr/bin` / `~/.local/bin` would show up as
+    /// "command not found" even though `zsh -l -i` runs `.zshrc`. Snapshotting
+    /// the PATH from a real login+interactive zsh once at startup and
+    /// re-injecting it as the spawned process's environment guarantees child
+    /// commands see the same `$PATH` the user gets in Terminal.app.
+    private lazy var userShellPath: String = Self.snapshotUserShellPath()
+    private lazy var spawnEnvironment: [String] = Self.buildSpawnEnvironment(userPath: userShellPath)
+
     /// Per-task list of open Claude sessions. Lives here (not in ClaudeDetailView's @State)
     /// so the sessions survive sidebar selection changes.
     @Published var claudeSessions: [String: [ClaudeSession]] = [:]
@@ -98,11 +109,51 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         view.startProcess(
             executable: "/bin/zsh",
             args: ["-l", "-i", "-c", wrapped],
-            environment: nil,
+            environment: spawnEnvironment,
             execName: nil
         )
 
         scheduleReadinessCheck(for: task)
+    }
+
+    // MARK: - Environment snapshot
+
+    /// One-shot snapshot of `$PATH` from a login + interactive zsh. Falls back
+    /// to the current process's PATH when something goes wrong so we still
+    /// spawn *something* rather than nothing.
+    private static func snapshotUserShellPath() -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        // -l: source .zprofile / .zlogin.  -i: source .zshrc.
+        // `print -rn -- $PATH` is portable, prints raw without newline so we
+        // don't have to trim a trailing \n on every platform.
+        process.arguments = ["-l", "-i", "-c", "print -rn -- $PATH"]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()  // discard
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            if let path = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !path.isEmpty {
+                NSLog("[ProcessManager] snapshotUserShellPath: %@", path)
+                return path
+            }
+        } catch {
+            NSLog("[ProcessManager] snapshotUserShellPath failed: %@", "\(error)")
+        }
+        return ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+    }
+
+    /// Inherit Heart.app's environment but with PATH replaced by the user's
+    /// shell PATH. Returned as `["KEY=VALUE", …]` because that's what
+    /// LocalProcessTerminalView.startProcess expects.
+    private static func buildSpawnEnvironment(userPath: String) -> [String] {
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = userPath
+        return env.map { "\($0.key)=\($0.value)" }
     }
 
     /// Graceful stop: SIGINT (like Ctrl+C) → 3s SIGTERM → 3s SIGKILL.

@@ -914,11 +914,18 @@ struct ContentView: View {
                     Text("'\(project)' has no tasks yet.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                    Text("Drop a heart.json onto this project to replace it, or add tasks via Settings.")
+                    Text("Drop a heart.json onto this project to replace it, click + Task in the sidebar to add one by hand, or read the format help to generate one with Claude.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                        .frame(maxWidth: 360)
+                        .frame(maxWidth: 420)
+                    Button {
+                        showFormatHelp = true
+                    } label: {
+                        Label("How do I write heart.json?", systemImage: "questionmark.circle.fill")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
                 } else {
                     Text("Pick a task from the sidebar.")
                         .font(.callout)
@@ -941,17 +948,31 @@ struct ContentView: View {
                 .foregroundStyle(Color.purple)
             Text("Welcome to Heart")
                 .font(.title.bold())
-            Text("Run your whole stack from one window.")
+            Text("Run your whole stack from one window — services, shortcuts, Claude sessions, quick actions.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 460)
 
-            Button {
-                createEmptyProject()
-            } label: {
-                Label("Create your first project", systemImage: "folder.badge.plus")
+            HStack(spacing: 10) {
+                Button {
+                    createEmptyProject()
+                } label: {
+                    Label("Create empty project", systemImage: "folder.badge.plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                Button {
+                    showFormatHelp = true
+                } label: {
+                    Label("Generate with Claude", systemImage: "sparkles")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            Text("Already have a heart.json? Drop it on the tab bar above.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
