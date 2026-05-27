@@ -3,6 +3,10 @@ import AppKit
 
 struct SettingsView: View {
     @ObservedObject var store: TaskStore
+    /// The project whose tasks this editor is scoped to. Settings used to act
+    /// on the global task list, which silently mutated unrelated projects —
+    /// now the editor only sees / writes the active project's heart.json.
+    let project: String
     @Environment(\.dismiss) private var dismiss
 
     @State private var jsonText: String = ""
@@ -12,7 +16,7 @@ struct SettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text("Tasks (JSON)")
+                Text("Tasks (JSON) — \(project)")
                     .font(.title2.bold())
                 Button {
                     showFormatHelp = true
@@ -27,7 +31,7 @@ struct SettingsView: View {
                 .controlSize(.small)
                 .help("Show heart.json schema reference")
                 Spacer()
-                Text(store.configPath)
+                Text(store.projectFilePath(project) ?? "")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -75,10 +79,30 @@ struct SettingsView: View {
         }
         .frame(minWidth: 760, minHeight: 540)
         .onAppear {
-            jsonText = encode(store.tasks)
+            jsonText = encode(projectScopedTasks())
         }
         .sheet(isPresented: $showFormatHelp) {
             JSONFormatHelp(onClose: { showFormatHelp = false })
+        }
+    }
+
+    // MARK: - project scoping
+
+    /// Tasks belonging to this project, with `folder` rebased to project-local
+    /// form ("Frontend" instead of "Maatrics/Frontend") so users editing the
+    /// JSON don't see a redundant project name on every task.
+    private func projectScopedTasks() -> [DevTask] {
+        let prefix = project + "/"
+        return store.tasksUnder(project: project).map { task -> DevTask in
+            var t = task
+            if let folder = t.folder {
+                if folder == project {
+                    t.folder = nil
+                } else if folder.hasPrefix(prefix) {
+                    t.folder = String(folder.dropFirst(prefix.count))
+                }
+            }
+            return t
         }
     }
 
@@ -87,7 +111,9 @@ struct SettingsView: View {
     private func saveAndClose() {
         let result = decode(jsonText)
         if let tasks = result.tasks {
-            store.update(tasks)
+            // Tasks parsed out of the editor have project-local `folder` values.
+            // `replaceProject` re-prefixes them back to the global shape.
+            store.replaceProject(project, with: tasks, source: nil)
             errorMessage = nil
             dismiss()
         } else {
@@ -96,12 +122,17 @@ struct SettingsView: View {
     }
 
     private func resetToDefaults() {
-        jsonText = encode(TaskStore.defaults)
+        jsonText = encode(TaskStore.defaults.map { task -> DevTask in
+            var t = task
+            t.folder = nil   // defaults render as project-root tasks for this project
+            return t
+        })
         errorMessage = nil
     }
 
     private func openInFinder() {
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: store.configPath)])
+        guard let path = store.projectFilePath(project) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
     private func importJSON() {
@@ -121,7 +152,10 @@ struct SettingsView: View {
     private func exportJSON() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "tasks.json"
+        let slug = project
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+        panel.nameFieldStringValue = "\(slug).json"
         if panel.runModal() == .OK, let url = panel.url {
             try? jsonText.data(using: .utf8)?.write(to: url)
         }

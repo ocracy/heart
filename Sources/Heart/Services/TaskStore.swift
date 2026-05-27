@@ -1,6 +1,46 @@
 import Foundation
 import Combine
 
+/// Saved URL the user wants quick access to when adding a Browser task.
+/// Stored globally (cross-project) in `bookmarks.json` so the library follows
+/// the user, not the project.
+struct Bookmark: Codable, Identifiable, Hashable {
+    var id: String
+    var name: String
+    var url: String
+    var icon: String?
+
+    init(id: String = UUID().uuidString, name: String, url: String, icon: String? = nil) {
+        self.id = id
+        self.name = name
+        self.url = url
+        self.icon = icon
+    }
+}
+
+/// On-disk shape of a single project file (`projects/<id>.json`). Each project
+/// is fully self-contained: its tasks, its imported source path, its own
+/// folder ordering and explicitly-remembered (empty) subfolders. Folder strings
+/// inside ProjectFile are **project-local** — i.e. `"Frontend/Workers"` not
+/// `"Maatrics/Frontend/Workers"`. The project name is implicit (it's `name`).
+struct ProjectFile: Codable {
+    var schemaVersion: Int = 1
+    var id: String
+    var name: String
+    var tasks: [DevTask]
+    var rememberedFolders: [String] = []
+    /// Parent path (project-local; `""` = project root) → ordered child folder names.
+    var folderOrder: [String: [String]] = [:]
+    /// Absolute path of the heart.json this project was imported from, if any.
+    var bundleSource: String?
+}
+
+/// `projects.json` — index file listing project ids in tab order.
+struct ProjectIndex: Codable {
+    var schemaVersion: Int = 1
+    var order: [String]
+}
+
 /// Node in the folder tree. Reference type so we can mutate `subfolders`/`tasks` while building.
 final class FolderNode {
     let name: String
@@ -43,14 +83,26 @@ final class TaskStore: ObservableObject {
     /// Value is the ordered list of immediate child folder names. Missing keys
     /// fall back to alphabetical / insertion order.
     @Published var folderOrder: [String: [String]] = [:]
+    /// Saved URL library shown in the "+ Browser" menu. Cross-project, persisted
+    /// globally to `bookmarks.json` so the list survives project deletions.
+    @Published var bookmarks: [Bookmark] = []
 
     static let defaultProjectName = "Project 1"
 
-    private let fileURL: URL
-    private let sourcesURL: URL
-    private let projectsURL: URL
-    private let foldersURL: URL
-    private let folderOrderURL: URL
+    private let baseDir: URL
+    private let fileURL: URL            // legacy tasks.json (post-migration: removed)
+    private let sourcesURL: URL         // legacy sources.json (post-migration: split into ProjectFile.bundleSource)
+    private let projectsURL: URL        // index of project ids in tab order
+    private let foldersURL: URL         // legacy folders.json (post-migration: split into ProjectFile.rememberedFolders)
+    private let folderOrderURL: URL     // legacy folder-order.json (post-migration: split into ProjectFile.folderOrder)
+    private let bookmarksURL: URL
+    private let projectsDir: URL        // per-project files live here
+    private let trashDir: URL           // deleted projects archived here
+
+    /// Display-name → project id (slug + hex). Built during load/migration.
+    /// id is the filename stem in `projects/<id>.json`. Renaming a project only
+    /// touches `ProjectFile.name`; the id never changes.
+    private var projectIdsByName: [String: String] = [:]
 
     init() {
         let fm = FileManager.default
@@ -59,11 +111,15 @@ final class TaskStore: ObservableObject {
         if !fm.fileExists(atPath: dir.path) {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
+        self.baseDir = dir
         self.fileURL = dir.appendingPathComponent("tasks.json")
         self.sourcesURL = dir.appendingPathComponent("sources.json")
         self.projectsURL = dir.appendingPathComponent("projects.json")
         self.foldersURL = dir.appendingPathComponent("folders.json")
         self.folderOrderURL = dir.appendingPathComponent("folder-order.json")
+        self.bookmarksURL = dir.appendingPathComponent("bookmarks.json")
+        self.projectsDir = dir.appendingPathComponent("projects", isDirectory: true)
+        self.trashDir = self.projectsDir.appendingPathComponent(".trash", isDirectory: true)
 
         // One-time migration: if Heart's tasks.json doesn't exist yet but the legacy
         // Stoker config does, copy it over so users keep their setup after the rename.
@@ -76,24 +132,171 @@ final class TaskStore: ObservableObject {
             }
         }
 
-        load()
-        loadSources()
-        loadProjectOrder()
-        loadRememberedFolders()
-        loadFolderOrder()
-        // Folders are required — anything inherited from an older version with
-        // `folder: nil` lands under "Project 1" so it shows up in a tab.
+        loadBookmarks()
+        // Per-project files: if `projects/` exists, that's the truth. Otherwise
+        // migrate the legacy single tasks.json into per-project files.
+        if fm.fileExists(atPath: projectsDir.path) {
+            loadAllProjects()
+        } else if fm.fileExists(atPath: fileURL.path) {
+            migrateLegacyTasksJSON()
+        } else {
+            // First-ever launch — seed defaults into "Project 1".
+            try? fm.createDirectory(at: projectsDir, withIntermediateDirectories: true)
+            self.tasks = Self.defaults
+            ensureProjectInOrder(Self.defaultProjectName)
+            saveAllProjects()
+        }
+    }
+
+    /// Walk `projects/` and rebuild in-memory state (tasks, bundleSources,
+    /// rememberedFolders, folderOrder, projectIdsByName) from the per-project files.
+    private func loadAllProjects() {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: projectsDir,
+                                                       includingPropertiesForKeys: nil,
+                                                       options: [.skipsHiddenFiles]) else {
+            return
+        }
+        var allTasks: [DevTask] = []
+        var allSources: [String: String] = [:]
+        var allRemembered: Set<String> = []
+        var allFolderOrder: [String: [String]] = [:]
+        var idsByName: [String: String] = [:]
+        var filesById: [String: ProjectFile] = [:]
+
+        for entry in entries where entry.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: entry),
+                  let file = try? JSONDecoder().decode(ProjectFile.self, from: data) else {
+                continue
+            }
+            filesById[file.id] = file
+        }
+
+        // Re-read persisted projectOrder index. Anything in the index that has
+        // a matching file is appended in index order; remaining files come last.
+        var orderedIds: [String] = []
+        if let data = try? Data(contentsOf: projectsURL),
+           let decoded = try? JSONDecoder().decode(ProjectIndex.self, from: data) {
+            for id in decoded.order where filesById[id] != nil {
+                orderedIds.append(id)
+            }
+        }
+        for id in filesById.keys where !orderedIds.contains(id) {
+            orderedIds.append(id)
+        }
+
+        var orderNames: [String] = []
+        for id in orderedIds {
+            guard let file = filesById[id] else { continue }
+            idsByName[file.name] = id
+            orderNames.append(file.name)
+            // Re-base each task's folder back to the legacy global shape
+            // (project name + "/" + subfolder) so internal readers — which still
+            // expect that format — keep working without code changes.
+            for task in file.tasks {
+                var t = task
+                let sub = DevTask.subfolderPath(t.folder)
+                t.folder = sub.map { "\(file.name)/\($0)" } ?? file.name
+                allTasks.append(t)
+            }
+            for sub in file.rememberedFolders {
+                let s = sub.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                if s.isEmpty {
+                    allRemembered.insert(file.name)
+                } else {
+                    allRemembered.insert("\(file.name)/\(s)")
+                }
+            }
+            // folderOrder key in ProjectFile uses "" for the project root and
+            // subfolder-relative paths otherwise; rehydrate back to absolute paths.
+            for (key, children) in file.folderOrder {
+                let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                let absoluteKey = k.isEmpty ? file.name : "\(file.name)/\(k)"
+                allFolderOrder[absoluteKey] = children
+            }
+            if let src = file.bundleSource {
+                allSources[file.name] = src
+            }
+        }
+
+        self.tasks = allTasks
+        self.bundleSources = allSources
+        self.rememberedFolders = allRemembered
+        self.folderOrder = allFolderOrder
+        self.projectIdsByName = idsByName
+        self.projectOrder = orderNames
+        // Empty (no-task, no-folder) projects: the loop above already added them
+        // via `orderNames` so the tab bar will surface them.
+    }
+
+    /// First-launch-after-upgrade: split the single `tasks.json` into
+    /// `projects/<id>.json` files, then archive the legacy files as `.bak`.
+    private func migrateLegacyTasksJSON() {
+        let fm = FileManager.default
+        // Decode legacy state.
+        let legacyTasks: [DevTask] = (try? Data(contentsOf: fileURL))
+            .flatMap { try? JSONDecoder().decode([DevTask].self, from: $0) } ?? Self.defaults
+        let legacyOrder: [String] = (try? Data(contentsOf: projectsURL))
+            .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+        let legacySources: [String: String] = (try? Data(contentsOf: sourcesURL))
+            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+        let legacyFolders: [String] = (try? Data(contentsOf: foldersURL))
+            .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+        let legacyFolderOrder: [String: [String]] = (try? Data(contentsOf: folderOrderURL))
+            .flatMap { try? JSONDecoder().decode([String: [String]].self, from: $0) } ?? [:]
+
+        try? fm.createDirectory(at: projectsDir, withIntermediateDirectories: true)
+
+        // Populate live state — keep folder strings in the legacy global shape
+        // (project/subfolder) so the rest of the code works unchanged. The
+        // per-project files we write below use the subfolder-only shape.
+        self.tasks = legacyTasks
+        self.bundleSources = legacySources
+        self.rememberedFolders = Set(legacyFolders)
+        self.folderOrder = legacyFolderOrder
+        self.projectOrder = legacyOrder
         migrateNilFolders()
+
+        // Allocate ids for every discovered project, then write its file.
+        let projects = derivedProjects()
+        for name in projects {
+            let id = allocateProjectId(for: name)
+            projectIdsByName[name] = id
+            writeProjectFile(name: name, id: id)
+        }
+        // Reorder index to match `legacyOrder` where possible, then anything new.
+        var ids: [String] = []
+        var seen: Set<String> = []
+        for name in legacyOrder {
+            if let id = projectIdsByName[name], !seen.contains(id) {
+                ids.append(id); seen.insert(id)
+            }
+        }
+        for name in projects {
+            if let id = projectIdsByName[name], !seen.contains(id) {
+                ids.append(id); seen.insert(id)
+            }
+        }
+        writeProjectIndex(orderedIds: ids)
+
+        // Archive legacy files so the user can roll back manually.
+        for url in [fileURL, sourcesURL, foldersURL, folderOrderURL] {
+            guard fm.fileExists(atPath: url.path) else { continue }
+            let bak = url.appendingPathExtension("bak")
+            _ = try? fm.removeItem(at: bak)
+            _ = try? fm.moveItem(at: url, to: bak)
+        }
+        // The old projects.json was an order-only list of names; we rewrote it
+        // above with the new schema. Keep a .legacy.bak for paranoia.
+        // (writeProjectIndex already overwrote it; we already archived above.)
     }
 
     func load() {
-        if let data = try? Data(contentsOf: fileURL),
-           let decoded = try? JSONDecoder().decode([DevTask].self, from: data) {
-            self.tasks = decoded
-        } else {
-            self.tasks = Self.defaults
-            save()
-        }
+        // Legacy entrypoint preserved for callers; loadAllProjects is what we
+        // actually use now. Reload from disk by re-running the project loader.
+        loadAllProjects()
     }
 
     private func loadSources() {
@@ -105,15 +308,11 @@ final class TaskStore: ObservableObject {
     }
 
     private func saveSources() {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        do {
-            let data = try encoder.encode(bundleSources)
-            try data.write(to: sourcesURL, options: .atomic)
-        } catch {
-            // Non-fatal — sources.json is just a "Save" affordance.
-            NSLog("[TaskStore] saveSources failed: %@", "\(error)")
-        }
+        // Post-refactor: bundleSource lives inside each ProjectFile. The
+        // legacy `sources.json` is not re-created. Callers continue to mutate
+        // `bundleSources` in memory; the actual on-disk update happens through
+        // saveAllProjects() (invoked by save()).
+        saveAllProjects()
     }
 
     private func loadProjectOrder() {
@@ -125,14 +324,9 @@ final class TaskStore: ObservableObject {
     }
 
     private func saveProjectOrder() {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted]
-        do {
-            let data = try encoder.encode(projectOrder)
-            try data.write(to: projectsURL, options: .atomic)
-        } catch {
-            NSLog("[TaskStore] saveProjectOrder failed: %@", "\(error)")
-        }
+        // Post-refactor: tab order is the index of ids in `projects.json`. The
+        // canonical write path is `writeProjectIndex` via saveAllProjects().
+        saveAllProjects()
     }
 
     private func loadFolderOrder() {
@@ -144,14 +338,50 @@ final class TaskStore: ObservableObject {
     }
 
     private func saveFolderOrder() {
+        // Post-refactor: per-project folderOrder lives inside each ProjectFile.
+        saveAllProjects()
+    }
+
+    private func loadBookmarks() {
+        guard let data = try? Data(contentsOf: bookmarksURL),
+              let decoded = try? JSONDecoder().decode([Bookmark].self, from: data) else {
+            return
+        }
+        self.bookmarks = decoded
+    }
+
+    private func saveBookmarks() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
-            let data = try encoder.encode(folderOrder)
-            try data.write(to: folderOrderURL, options: .atomic)
+            let data = try encoder.encode(bookmarks)
+            try data.write(to: bookmarksURL, options: .atomic)
         } catch {
-            NSLog("[TaskStore] saveFolderOrder failed: %@", "\(error)")
+            NSLog("[TaskStore] saveBookmarks failed: %@", "\(error)")
         }
+    }
+
+    /// Add a bookmark to the library. De-duped by trimmed URL — re-saving the
+    /// same URL just updates the existing entry's name/icon in place so the
+    /// menu doesn't grow duplicates after repeated "Save as bookmark" clicks.
+    func addBookmark(name: String, url: String, icon: String? = nil) {
+        let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty else { return }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let idx = bookmarks.firstIndex(where: { $0.url == trimmedURL }) {
+            bookmarks[idx].name = trimmedName.isEmpty ? bookmarks[idx].name : trimmedName
+            if let icon { bookmarks[idx].icon = icon }
+        } else {
+            bookmarks.append(Bookmark(name: trimmedName.isEmpty ? trimmedURL : trimmedName,
+                                      url: trimmedURL,
+                                      icon: icon))
+        }
+        saveBookmarks()
+    }
+
+    func removeBookmark(id: String) {
+        bookmarks.removeAll { $0.id == id }
+        saveBookmarks()
     }
 
     private func loadRememberedFolders() {
@@ -163,14 +393,8 @@ final class TaskStore: ObservableObject {
     }
 
     private func saveRememberedFolders() {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        do {
-            let data = try encoder.encode(rememberedFolders.sorted())
-            try data.write(to: foldersURL, options: .atomic)
-        } catch {
-            NSLog("[TaskStore] saveRememberedFolders failed: %@", "\(error)")
-        }
+        // Post-refactor: per-project rememberedFolders lives inside each ProjectFile.
+        saveAllProjects()
     }
 
     /// Remember which file a folder was imported from (used for "Save" overwrite).
@@ -189,15 +413,152 @@ final class TaskStore: ObservableObject {
     }
 
     func save() {
+        // Global save — fan out to every known project file. Used by paths that
+        // don't know which project(s) they touched (e.g. legacy callers).
+        saveAllProjects()
+    }
+
+    /// Write only the file backing `projectName`. Preferred over `save()` when
+    /// we know which project was mutated — keeps mtime stable on every other
+    /// project's file (so per-project file copies + diffs stay clean).
+    func saveProject(_ projectName: String) {
+        let id = projectIdsByName[projectName] ?? allocateProjectId(for: projectName)
+        projectIdsByName[projectName] = id
+        writeProjectFile(name: projectName, id: id)
+        // Sync the index — projects.json should reflect projectOrder of ids.
+        let ids = projectOrder.compactMap { projectIdsByName[$0] }
+        writeProjectIndex(orderedIds: ids)
+    }
+
+    /// Write every known project. Used by global save() and migrations.
+    func saveAllProjects() {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: projectsDir.path) {
+            try? fm.createDirectory(at: projectsDir, withIntermediateDirectories: true)
+        }
+        let projects = derivedProjects()
+        // Allocate ids for any project that doesn't have one yet.
+        for name in projects where projectIdsByName[name] == nil {
+            projectIdsByName[name] = allocateProjectId(for: name)
+        }
+        let activeNames = Set(projects)
+        let activeIds = Set(projects.compactMap { projectIdsByName[$0] })
+
+        // Archive any project files on disk whose project is no longer in
+        // memory (rename → .trash/<id>.<epoch>.json.deleted). This is what
+        // makes "delete project" actually remove the file.
+        if let entries = try? fm.contentsOfDirectory(at: projectsDir,
+                                                    includingPropertiesForKeys: nil,
+                                                    options: [.skipsHiddenFiles]) {
+            for entry in entries where entry.pathExtension == "json" {
+                let id = entry.deletingPathExtension().lastPathComponent
+                guard !activeIds.contains(id) else { continue }
+                try? fm.createDirectory(at: trashDir, withIntermediateDirectories: true)
+                let epoch = Int(Date().timeIntervalSince1970)
+                let archive = trashDir.appendingPathComponent("\(id).\(epoch).json.deleted")
+                _ = try? fm.moveItem(at: entry, to: archive)
+            }
+        }
+
+        // Drop ids whose project no longer exists.
+        for (name, _) in projectIdsByName where !activeNames.contains(name) {
+            projectIdsByName.removeValue(forKey: name)
+        }
+        for name in projects {
+            guard let id = projectIdsByName[name] else { continue }
+            writeProjectFile(name: name, id: id)
+        }
+        let ids = projectOrder.compactMap { projectIdsByName[$0] }
+        writeProjectIndex(orderedIds: ids)
+    }
+
+    /// Slug-based id (`<slug>-<hex4>`). Collision-proof because the random
+    /// suffix means two projects named identically still get unique filenames.
+    private func allocateProjectId(for name: String) -> String {
+        let lower = name.lowercased()
+        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789-")
+        let cleaned = lower.map { ch -> Character in
+            allowed.contains(ch) ? ch : "-"
+        }
+        let collapsed = String(cleaned)
+            .split(separator: "-")
+            .joined(separator: "-")
+        let slug = collapsed.isEmpty ? "project" : collapsed
+        let hex = String(format: "%04x", Int.random(in: 0..<0x10000))
+        return "\(slug)-\(hex)"
+    }
+
+    private func writeProjectFile(name: String, id: String) {
+        // Collect project-local task list. Strip the project-name prefix from
+        // `folder` so the file stores subfolder-only paths.
+        let prefix = name + "/"
+        let projectTasks: [DevTask] = tasks.compactMap { task in
+            guard let folder = task.folder else { return nil }
+            if folder == name {
+                var t = task
+                t.folder = nil
+                return t
+            }
+            if folder.hasPrefix(prefix) {
+                var t = task
+                t.folder = String(folder.dropFirst(prefix.count))
+                return t
+            }
+            return nil
+        }
+        let projectRemembered: [String] = rememberedFolders.compactMap { path in
+            if path == name { return "" }
+            if path.hasPrefix(prefix) { return String(path.dropFirst(prefix.count)) }
+            return nil
+        }.filter { !$0.isEmpty }
+        var projectFolderOrder: [String: [String]] = [:]
+        for (key, children) in folderOrder {
+            if key == name {
+                projectFolderOrder[""] = children
+            } else if key.hasPrefix(prefix) {
+                projectFolderOrder[String(key.dropFirst(prefix.count))] = children
+            }
+        }
+        let file = ProjectFile(
+            schemaVersion: 1,
+            id: id,
+            name: name,
+            tasks: projectTasks,
+            rememberedFolders: projectRemembered,
+            folderOrder: projectFolderOrder,
+            bundleSource: bundleSources[name]
+        )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
-            let data = try encoder.encode(tasks)
-            try data.write(to: fileURL, options: .atomic)
+            let data = try encoder.encode(file)
+            let dest = projectsDir.appendingPathComponent("\(id).json")
+            let tmp = dest.appendingPathExtension("tmp")
+            try data.write(to: tmp, options: .atomic)
+            _ = try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.moveItem(at: tmp, to: dest)
         } catch {
-            NSLog("[TaskStore] save failed (path=%@, taskCount=%d): %@",
-                  fileURL.path, tasks.count, "\(error)")
+            NSLog("[TaskStore] writeProjectFile failed (id=%@): %@", id, "\(error)")
         }
+    }
+
+    private func writeProjectIndex(orderedIds: [String]) {
+        let index = ProjectIndex(schemaVersion: 1, order: orderedIds)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(index)
+            try data.write(to: projectsURL, options: .atomic)
+        } catch {
+            NSLog("[TaskStore] writeProjectIndex failed: %@", "\(error)")
+        }
+    }
+
+    /// Absolute filesystem path of `projects/<id>.json` for the given project.
+    /// Used by SettingsView for "Open in Finder" and the path display header.
+    func projectFilePath(_ projectName: String) -> String? {
+        guard let id = projectIdsByName[projectName] else { return nil }
+        return projectsDir.appendingPathComponent("\(id).json").path
     }
 
     func update(_ updated: [DevTask]) {
@@ -751,6 +1112,13 @@ final class TaskStore: ObservableObject {
         var n = 2
         while taken.contains("\(base) (\(n))") { n += 1 }
         return "\(base) (\(n))"
+    }
+
+    /// Public helper so import flows can pick a non-colliding project name when
+    /// a dropped bundle's `name` clashes with an existing tab. Returns `base`
+    /// untouched if no project owns that name yet, otherwise appends " (N)".
+    func availableProjectName(base: String) -> String {
+        uniqueProjectName(base: base, taken: Set(derivedProjects()))
     }
 
     /// Generic placeholders so the app is usable out of the box.

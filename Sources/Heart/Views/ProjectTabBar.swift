@@ -19,6 +19,9 @@ struct ProjectTabBar: View {
     /// Called when a JSON file is dropped onto the tab bar (not onto a specific tab).
     /// Should import as a new project.
     let onDropNewProject: ([URL]) -> Void
+    /// Called when a JSON file is dropped directly onto an existing project pill.
+    /// Should replace that project's tasks (with the usual confirm prompt).
+    let onDropOntoProject: (String, [URL]) -> Void
     let onReorder: ([String]) -> Void
 
     let onRename: (String) -> Void
@@ -139,6 +142,13 @@ struct ProjectTabBar: View {
                     reorder(dragged: dragged, before: project)
                 }
             }
+            return true
+        }
+        // URL drop on the pill = replace that project's tasks. Without this,
+        // dropping a JSON onto a pill fell through to the system, which opened
+        // the file in a brand-new Heart window.
+        .dropDestination(for: URL.self) { urls, _ in
+            onDropOntoProject(project, urls)
             return true
         }
     }

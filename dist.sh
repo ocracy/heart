@@ -1,11 +1,15 @@
 #!/bin/bash
 # Builds Heart.app and zips it for distribution.
-# Output: Heart.zip — Apple Silicon (arm64). Intel users can build from source.
-# (SwiftTerm pulls in a Metal renderer; cross-arch release builds need the Metal
-#  toolchain, which is heavyweight to install for the small Intel audience left.)
+# Output: Heart.zip — universal binary (arm64 + x86_64) for macOS 13+.
 
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# Single source of truth for the bundled version. The in-app updater
+# (UpdateChecker.swift) compares this against the latest GitHub release
+# tag, so bumping this string is the only thing required when shipping
+# a new build — make sure it matches the `vX.Y.Z` git tag you publish.
+VERSION="1.8.0"
 
 APP_NAME="Heart"
 APP="${APP_NAME}.app"
@@ -16,12 +20,18 @@ iconutil -c icns AppIcon.iconset -o AppIcon.icns
 
 echo "→ Building release binary (arm64)…"
 swift build -c release --arch arm64
+ARM_BIN=".build/arm64-apple-macosx/release/${APP_NAME}"
+[ -f "${ARM_BIN}" ] || { echo "✗ arm64 build output missing at ${ARM_BIN}"; exit 1; }
 
-BIN_PATH=".build/arm64-apple-macosx/release/${APP_NAME}"
-if [ ! -f "${BIN_PATH}" ]; then
-  echo "✗ Build output not found at ${BIN_PATH}"
-  exit 1
-fi
+echo "→ Building release binary (x86_64)…"
+swift build -c release --arch x86_64
+X86_BIN=".build/x86_64-apple-macosx/release/${APP_NAME}"
+[ -f "${X86_BIN}" ] || { echo "✗ x86_64 build output missing at ${X86_BIN}"; exit 1; }
+
+echo "→ Fusing into universal binary…"
+UNIVERSAL_BIN=".build/universal-${APP_NAME}"
+lipo -create -output "${UNIVERSAL_BIN}" "${ARM_BIN}" "${X86_BIN}"
+BIN_PATH="${UNIVERSAL_BIN}"
 
 echo "→ Packaging ${APP}..."
 rm -rf "${APP}"
@@ -32,7 +42,7 @@ cp "${BIN_PATH}" "${APP}/Contents/MacOS/${APP_NAME}"
 chmod +x "${APP}/Contents/MacOS/${APP_NAME}"
 cp AppIcon.icns "${APP}/Contents/Resources/AppIcon.icns"
 
-cat > "${APP}/Contents/Info.plist" <<'PLIST'
+cat > "${APP}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -41,8 +51,8 @@ cat > "${APP}/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>app.heart.launcher</string>
   <key>CFBundleName</key><string>Heart</string>
   <key>CFBundleDisplayName</key><string>Heart</string>
-  <key>CFBundleVersion</key><string>1.7</string>
-  <key>CFBundleShortVersionString</key><string>1.7</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
@@ -93,8 +103,7 @@ ALTERNATIVE (without Terminal):
 OPTIONAL: drag tasks.example.json into Heart's sidebar to import
 a sample dev-server config as a folder.
 
-Requires macOS 13+. Apple Silicon (arm64). Intel Mac users — build from source:
-  git clone https://github.com/ocracy/heart.git && cd heart && ./install.sh
+Requires macOS 13+. Universal binary (Apple Silicon + Intel).
 TXT
 
 echo "→ Creating Heart.zip…"

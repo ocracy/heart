@@ -172,7 +172,7 @@ Read https://raw.githubusercontent.com/ocracy/heart/refs/heads/main/heart-json-g
     private var sectionTaskKinds: some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionTitle("Task kinds")
-            Text("There are four kinds of tasks. The UI surfaces each differently — pick the right one for the job.")
+            Text("There are six kinds of tasks. The UI surfaces each differently — pick the right one for the job.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -193,6 +193,14 @@ Read https://raw.githubusercontent.com/ocracy/heart/refs/heads/main/heart-json-g
                         iconName: "bolt.fill", tint: .orange,
                         title: "Quick action",
                         desc: "Compact chip above the sidebar. One click runs the command, one click stops. No port / URL. Built for migrations, cache busts, formatters.")
+                kindRow(value: "\"browser\"",
+                        iconName: "globe", tint: .blue,
+                        title: "Browser bookmark",
+                        desc: "URL-only row. Clicking opens the page in Heart's built-in browser; an arrow icon opens it in your default external browser. No command.")
+                kindRow(value: "\"github\"",
+                        iconName: "chevron.left.forwardslash.chevron.right", tint: .purple,
+                        title: "GitHub repo",
+                        desc: "GitHub Desktop-style panel for a local git repo: changed files on the left, diff on the right, commit bar at the bottom, push/pull at the top. `cwd` is the repo path; no command is run. Add as many as you like per project for multiple repos.")
             }
         }
     }
@@ -205,12 +213,12 @@ Read https://raw.githubusercontent.com/ocracy/heart/refs/heads/main/heart-json-g
                          desc: "Stable identifier. Auto-generated (UUID) if missing. Reusing the same id across imports updates an existing task instead of creating a duplicate.")
                 fieldRow("name", "string", required: false,
                          desc: "Display name in the sidebar. Optional if `icon` is set — Heart will render the icon alone.")
-                fieldRow("command", "string", required: true,
-                         desc: "Shell command. Runs in zsh -l -i (login + interactive) inside a PTY, so ~/.zshrc and ~/.zprofile are sourced.")
-                fieldRow("cwd", "string", required: true,
-                         desc: "Working directory. Tilde (~) is expanded.")
+                fieldRow("command", "string", required: false,
+                         desc: "Shell command. Runs in zsh -l -i (login + interactive) inside a PTY, so ~/.zshrc and ~/.zprofile are sourced. Required for service / shortcut / claude / quick. Omitted (or empty) for browser and github — those never spawn a process.")
+                fieldRow("cwd", "string", required: false,
+                         desc: "Working directory. Tilde (~) is expanded. Required for service / shortcut / claude / quick / github (where it's the repo path). Optional for browser.")
                 fieldRow("kind", "enum", required: false,
-                         desc: "Behavior tag — see Task kinds above. One of: `\"claude\"`, `\"shortcut\"`, `\"quick\"`. Omit for a regular service.")
+                         desc: "Behavior tag — see Task kinds above. One of: `\"claude\"`, `\"shortcut\"`, `\"quick\"`, `\"browser\"`, `\"github\"`. Omit for a regular service.")
                 fieldRow("icon", "string", required: false,
                          desc: "SF Symbol name (e.g. `server.rack`, `bolt.fill`, `globe`). Lowercase + dotted. Renders next to the task name. Wrong / unknown names render blank — stick to real symbols.")
                 fieldRow("port", "number", required: false,
@@ -295,10 +303,29 @@ Read https://raw.githubusercontent.com/ocracy/heart/refs/heads/main/heart-json-g
                   "command": "claude",
                   "cwd": "~/code/my-shop",
                   "kind": "claude"
+                },
+                {
+                  "id": "repo-web",
+                  "name": "Web repo",
+                  "cwd": "~/code/my-shop/web",
+                  "folder": "Repos",
+                  "kind": "github",
+                  "icon": "chevron.left.forwardslash.chevron.right"
+                },
+                {
+                  "id": "repo-api",
+                  "name": "API repo",
+                  "cwd": "~/code/my-shop/api",
+                  "folder": "Repos",
+                  "kind": "github"
                 }
               ]
             }
             """)
+            Text("You can add as many `kind: \"github\"` tasks as you need — each one keeps its own branch, dirty count, and commit/push state, independent of the others. The `command` field is omitted entirely for github tasks; only `cwd` (repo path) is required.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

@@ -42,6 +42,15 @@ struct DevTask: Codable, Identifiable, Equatable, Hashable {
         self.order = order
     }
 
+    /// Trim and normalize a `folder` value when it's expected to be
+    /// project-local (no project name prefix). `nil` means project root.
+    static func subfolderPath(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return s.isEmpty ? nil : s
+    }
+
     var isClaudeShortcut: Bool { kind == "claude" }
     /// One-shot command surfaced as a chip above the sidebar. Runs on click and
     /// shows its output in the detail pane; no on/off status indicator in the
@@ -52,6 +61,13 @@ struct DevTask: Codable, Identifiable, Equatable, Hashable {
     /// buttons; clicking starts the command if it isn't already running and
     /// selects the row so its terminal fills the detail pane.
     var isShortcut: Bool { kind == "shortcut" }
+    /// URL-only task — renders the built-in browser tab in the detail pane and
+    /// never spawns a process. `command` and `cwd` are stored placeholders.
+    var isBrowser: Bool { kind == "browser" }
+    /// Git repo task — renders a GitHub Desktop-style panel in the detail pane
+    /// (changed files + diff + commit + push/pull). Never spawns a process; `cwd`
+    /// holds the repo path. `command` is left empty.
+    var isGithub: Bool { kind == "github" }
 
     // Resilient decoder — every non-essential field gets a sensible default when
     // missing from the JSON, so hand-written / generated heart.json files don't

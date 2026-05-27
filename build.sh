@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Keep in sync with dist.sh — single source of truth for the bundled
+# version that the in-app updater (UpdateChecker.swift) reads via
+# CFBundleShortVersionString.
+VERSION="1.8.0"
+
 APP_NAME="Heart"
 APP="${APP_NAME}.app"
 BIN_PATH=".build/release/${APP_NAME}"
@@ -27,7 +32,7 @@ cp "${BIN_PATH}" "${APP}/Contents/MacOS/${APP_NAME}"
 chmod +x "${APP}/Contents/MacOS/${APP_NAME}"
 cp AppIcon.icns "${APP}/Contents/Resources/AppIcon.icns"
 
-cat > "${APP}/Contents/Info.plist" <<'PLIST'
+cat > "${APP}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -36,8 +41,8 @@ cat > "${APP}/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>app.heart.launcher</string>
   <key>CFBundleName</key><string>Heart</string>
   <key>CFBundleDisplayName</key><string>Heart</string>
-  <key>CFBundleVersion</key><string>1.7</string>
-  <key>CFBundleShortVersionString</key><string>1.7</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>

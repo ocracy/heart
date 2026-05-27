@@ -55,6 +55,10 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         view.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         view.nativeBackgroundColor = NSColor(calibratedWhite: 0.10, alpha: 1.0)
         view.nativeForegroundColor = NSColor(calibratedWhite: 0.92, alpha: 1.0)
+        // SwiftTerm default scrollback is 500 lines — way too small for dev servers that
+        // log hundreds of lines per request. Bump to 50k so the user can scroll back
+        // through long sessions (build logs, test runs, claude conversations).
+        view.getTerminal().changeScrollback(50_000)
         terminalViews[taskId] = view
         return view
     }
@@ -92,6 +96,9 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
     // MARK: - lifecycle
 
     func start(_ task: DevTask) {
+        // Browser tasks have no command — they exist only to render the in-app
+        // browser tab in the detail pane.
+        if task.isBrowser { return }
         let view = terminalView(for: task.id)
         if view.process.running {
             return
@@ -150,9 +157,22 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
     /// Inherit Heart.app's environment but with PATH replaced by the user's
     /// shell PATH. Returned as `["KEY=VALUE", …]` because that's what
     /// LocalProcessTerminalView.startProcess expects.
+    ///
+    /// We also force `TERM=xterm-256color` and `COLORTERM=truecolor` because
+    /// Heart.app is launched by launchd which doesn't set those vars — without
+    /// them, CLIs like `claude` probe stdout and start in monochrome mode for
+    /// the first few render passes (the splash banner draws white, then later
+    /// output picks up colors once the app re-queries terminal caps). Setting
+    /// them up front means colors come through from frame zero. LANG follows
+    /// SwiftTerm's `getEnvironmentVariables` so UTF-8 glyphs render correctly.
     private static func buildSpawnEnvironment(userPath: String) -> [String] {
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = userPath
+        env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
+        if env["LANG"] == nil {
+            env["LANG"] = "en_US.UTF-8"
+        }
         return env.map { "\($0.key)=\($0.value)" }
     }
 

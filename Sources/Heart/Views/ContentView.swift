@@ -5,11 +5,13 @@ import UniformTypeIdentifiers
 enum DetailTab: String, CaseIterable, Hashable {
     case terminal
     case browser
+    case github
 
     var label: String {
         switch self {
         case .terminal: return "Terminal"
         case .browser: return "Browser"
+        case .github:   return "Git"
         }
     }
 
@@ -17,6 +19,7 @@ enum DetailTab: String, CaseIterable, Hashable {
         switch self {
         case .terminal: return "terminal"
         case .browser: return "globe"
+        case .github:  return "chevron.left.forwardslash.chevron.right"
         }
     }
 }
@@ -25,6 +28,11 @@ struct ContentView: View {
     @ObservedObject var store: TaskStore
     @ObservedObject var processManager: ProcessManager
     @ObservedObject var browserManager: BrowserManager
+    @ObservedObject var gitManager: GitManager
+    /// Routes external file URLs (Finder/dock drops, "open with…") into this
+    /// window. Without it, dropped JSONs spawn a new blank window.
+    @ObservedObject var router: ContentRouter
+    @ObservedObject private var updateChecker = UpdateChecker.shared
 
     @State private var selectedProject: String?
     /// Per-project memory of the last selected task. Restored when switching tabs.
@@ -71,6 +79,7 @@ struct ContentView: View {
                     onCreateEmpty: createEmptyProject,
                     onShowFormatHelp: { showFormatHelp = true },
                     onDropNewProject: { urls in handleDroppedURLs(urls, into: nil) },
+                    onDropOntoProject: { project, urls in handleDroppedURLs(urls, into: project) },
                     onReorder: { store.reorderProjects($0) },
                     onRename: { renameTarget = RenameRequest(currentName: $0) },
                     onSave: { saveProject($0) },
@@ -90,7 +99,21 @@ struct ContentView: View {
             mainPane
         }
         .toolbar { toolbarItems }
-        .sheet(isPresented: $showSettings) { SettingsView(store: store) }
+        .sheet(isPresented: $showSettings) {
+            if let project = selectedProject {
+                SettingsView(store: store, project: project)
+            }
+        }
+        .onReceive(router.$pendingImportURLs) { urls in
+            guard !urls.isEmpty else { return }
+            // Drain the queue before processing so re-entrant onReceive doesn't
+            // re-import the same URLs.
+            router.pendingImportURLs = []
+            for url in urls { presentImport(for: url) }
+        }
+        .sheet(isPresented: $updateChecker.sheetPresented) {
+            UpdateView(checker: updateChecker, onClose: { updateChecker.sheetPresented = false })
+        }
         .sheet(isPresented: $showFormatHelp) {
             JSONFormatHelp(onClose: { showFormatHelp = false })
         }
@@ -195,7 +218,11 @@ struct ContentView: View {
                 pendingReplace = nil
             }
         } message: { req in
-            Text("Replace tasks of '\(req.project)' with contents of \(req.sourceURL.lastPathComponent)?\nThis will overwrite all tasks in this project.")
+            if let summary = req.diffSummary {
+                Text("Reload '\(req.project)' from \(req.sourceURL.lastPathComponent)?\n\(summary)\nThis will overwrite all tasks in this project.")
+            } else {
+                Text("Replace tasks of '\(req.project)' with contents of \(req.sourceURL.lastPathComponent)?\nThis will overwrite all tasks in this project.")
+            }
         }
         .alert(
             "Delete project?",
@@ -326,12 +353,37 @@ struct ContentView: View {
 
             Spacer()
 
+            updateToolbarButton
+
             Button { showSettings = true } label: {
                 Label("Settings", systemImage: "gearshape")
             }
             .keyboardShortcut(",", modifiers: .command)
-            .help("Edit tasks")
+            .help(selectedProject.map { "Edit '\($0)' tasks" } ?? "Select a project first")
+            .disabled(selectedProject == nil)
         }
+    }
+
+    @ViewBuilder
+    private var updateToolbarButton: some View {
+        Button {
+            updateChecker.toolbarTapped()
+        } label: {
+            // Spin a ProgressView while checking or downloading so the toolbar
+            // visibly reflects that something is happening; otherwise show the
+            // appropriate icon. SwiftUI re-renders this whenever `state`
+            // changes because UpdateChecker is observed.
+            switch updateChecker.state {
+            case .checking, .downloading:
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 16, height: 16)
+            default:
+                Label("Updates", systemImage: updateChecker.toolbarSystemImage)
+                    .foregroundStyle(updateChecker.toolbarTint ?? .primary)
+            }
+        }
+        .help(updateChecker.toolbarTooltip)
     }
 
     @ViewBuilder
@@ -341,6 +393,7 @@ struct ContentView: View {
                     ProjectSidebar(
                             store: store,
                             processManager: processManager,
+                            gitManager: gitManager,
                             project: project,
                             selectedTaskId: $selectedTaskId,
                             collapsedFolders: $collapsedFolders,
@@ -359,6 +412,11 @@ struct ContentView: View {
                             onAddTask: { addBlankTask(to: project) },
                             onQuickTap: { task in toggleQuickAction(task) },
                             onAddQuickAction: { addBlankTask(to: project, kind: "quick") },
+                            onAddBrowser: { addBlankTask(to: project, kind: "browser") },
+                            onAddGithub: { addBlankTask(to: project, kind: "github") },
+                            onPickBookmark: { bookmark in addBookmarkAsTask(bookmark, to: project) },
+                            onSaveBookmark: { task in saveTaskAsBookmark(task) },
+                            onDeleteBookmark: { bookmark in store.removeBookmark(id: bookmark.id) },
                             onAddFolder: { parent in
                                 addFolderTarget = AddFolderRequest(parent: parent)
                             },
@@ -371,7 +429,8 @@ struct ContentView: View {
                             onResumeClaude: { resumeClaudeTarget = $0 },
                             editMode: editMode,
                             isDirty: isProjectDirty(project),
-                            onSaveSource: { saveProject(project) }
+                            onSaveSource: { saveProject(project) },
+                            onReloadSource: { reloadSource(project: project) }
                         )
             } detail: {
                 detail
@@ -421,7 +480,7 @@ struct ContentView: View {
 
     private func showBrowser(for task: DevTask) {
         selectedTaskId = task.id
-        if task.url != nil {
+        if task.isBrowser || task.url != nil {
             activeTabs[task.id] = .browser
         }
     }
@@ -429,7 +488,9 @@ struct ContentView: View {
     // MARK: - tab management
 
     private func tabs(for task: DevTask) -> [DetailTab] {
-        task.url == nil ? [.terminal] : [.terminal, .browser]
+        if task.isGithub { return [.github] }
+        if task.isBrowser { return [.browser] }
+        return task.url == nil ? [.terminal] : [.terminal, .browser]
     }
 
     private func activeTab(for task: DevTask) -> DetailTab {
@@ -603,15 +664,50 @@ struct ContentView: View {
     }
 
     private func addBlankTask(to project: String, kind: String? = nil) {
+        // Browser-kind tasks never run a command — pre-fill placeholders so
+        // EditTaskSheet's "Save" stays enabled without forcing the user to type
+        // anything in the (hidden) Command / Working directory fields. GitHub
+        // tasks leave command empty: the JSON shape for github omits it
+        // entirely and EditTaskSheet's isValid doesn't require it.
+        let placeholderCommand = (kind == "browser") ? ":" : ""
         let blank = DevTask(
             id: UUID().uuidString,
             name: "",
-            command: "",
+            command: placeholderCommand,
             cwd: NSHomeDirectory(),
             folder: project,
             kind: kind
         )
         editingTask = blank
+    }
+
+    /// Instantiate a saved bookmark as a browser task inside `project`. The
+    /// resulting row mirrors the bookmark's name + icon and points at its URL.
+    private func addBookmarkAsTask(_ bookmark: Bookmark, to project: String) {
+        let task = DevTask(
+            id: UUID().uuidString,
+            name: bookmark.name,
+            command: ":",
+            cwd: NSHomeDirectory(),
+            port: nil,
+            url: bookmark.url,
+            autoStart: false,
+            folder: project,
+            kind: "browser",
+            icon: bookmark.icon
+        )
+        store.upsert(task)
+        selectedTaskId = task.id
+        activeTabs[task.id] = .browser
+    }
+
+    /// Save the task's current URL + name into the global bookmark library so
+    /// it can be one-click added to any project from the "+ Browser" menu.
+    private func saveTaskAsBookmark(_ task: DevTask) {
+        guard let url = task.url, !url.isEmpty else { return }
+        let name = task.name.trimmingCharacters(in: .whitespaces).isEmpty ? url : task.name
+        store.addBookmark(name: name, url: url, icon: task.icon)
+        importToast = "Saved '\(name)' to bookmarks"
     }
 
     /// Quick-action chip tapped — toggle process + select for the detail pane.
@@ -642,6 +738,7 @@ struct ContentView: View {
         }
         store.remove(id: task.id)
         browserManager.clear(taskId: task.id)
+        gitManager.clear(taskId: task.id)
     }
 
     private func deleteFolder(path: String) {
@@ -658,7 +755,10 @@ struct ContentView: View {
             selectedTaskId = remaining.first?.id
         }
         store.removeFolder(path: path)
-        for task in toRemove { browserManager.clear(taskId: task.id) }
+        for task in toRemove {
+            browserManager.clear(taskId: task.id)
+            gitManager.clear(taskId: task.id)
+        }
     }
 
     private func performDeleteProject(_ name: String) {
@@ -667,7 +767,10 @@ struct ContentView: View {
             processManager.stop(task)
         }
         store.removeFolder(path: name)
-        for task in toRemove { browserManager.clear(taskId: task.id) }
+        for task in toRemove {
+            browserManager.clear(taskId: task.id)
+            gitManager.clear(taskId: task.id)
+        }
         selectedTaskByProject.removeValue(forKey: name)
         if selectedProject == name {
             selectedProject = store.orderedProjects.first
@@ -739,19 +842,55 @@ struct ContentView: View {
         return true
     }
 
-    private func queueReplace(url: URL, project: String) {
+    private func queueReplace(url: URL, project: String, computeDiff: Bool = false) {
         do {
             let resolved = try parseImport(at: url)
+            let summary = computeDiff
+                ? diffSummary(current: store.tasksUnder(project: project), incoming: resolved.tasks)
+                : nil
             pendingReplace = PendingReplace(
                 project: project,
                 tasks: resolved.tasks,
-                sourceURL: URL(fileURLWithPath: resolved.sourcePath)
+                sourceURL: URL(fileURLWithPath: resolved.sourcePath),
+                diffSummary: summary
             )
         } catch let failure as ImportFailure {
             importError = failure.errorDescription
         } catch {
             importError = "Import failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Trigger an explicit "Reload from disk" for a project that's already
+    /// linked to a heart.json. Re-parses the file and queues the same confirm
+    /// alert used for drag/drop replacement, with a diff summary so the user
+    /// can see what changed before saying yes.
+    private func reloadSource(project: String) {
+        guard let path = store.bundleSource(forFolder: project) else { return }
+        queueReplace(url: URL(fileURLWithPath: path), project: project, computeDiff: true)
+    }
+
+    /// Compare two task lists by id, return a human-readable one-liner. Used
+    /// in the reload confirmation alert so the user knows whether to accept.
+    private func diffSummary(current: [DevTask], incoming: [DevTask]) -> String {
+        let currentById = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
+        let incomingById = Dictionary(uniqueKeysWithValues: incoming.map { ($0.id, $0) })
+        let currentIds = Set(currentById.keys)
+        let incomingIds = Set(incomingById.keys)
+        let added = incomingIds.subtracting(currentIds).count
+        let removed = currentIds.subtracting(incomingIds).count
+        var modified = 0
+        for (id, newTask) in incomingById {
+            if let old = currentById[id], old != newTask { modified += 1 }
+        }
+        if added == 0 && removed == 0 && modified == 0 {
+            return "No changes — disk matches memory."
+        }
+        var parts: [String] = []
+        if added > 0 { parts.append("\(added) added") }
+        if removed > 0 { parts.append("\(removed) removed") }
+        if modified > 0 { parts.append("\(modified) modified") }
+        return parts.joined(separator: " · ")
     }
 
     private func performReplace(_ req: PendingReplace) {
@@ -852,26 +991,23 @@ struct ContentView: View {
             return
         }
 
-        // Stop anything currently running under this folder so we don't
-        // strand zombie processes attached to deleted task ids.
-        for task in store.tasksUnder(path: folder)
-        where processManager.status(task.id).isRunning {
-            processManager.stop(task)
-        }
+        // Tab-bar drop always opens a NEW tab — if the bundle's `name` clashes
+        // with an existing project, suffix it ("Maatrics" → "Maatrics (2)").
+        // Replacing an existing project happens only when the user drops the
+        // bundle directly onto that project's sidebar.
+        let targetFolder = store.availableProjectName(base: folder)
 
-        // Single atomic mutation — was previously remove + append, two
-        // @Published changes which made SwiftUI render an intermediate
-        // (empty) sidebar and lingering "broken" tree until the window was
-        // reopened.
         store.replaceProject(
-            folder,
+            targetFolder,
             with: resolved.tasks,
             source: URL(fileURLWithPath: resolved.sourcePath)
         )
 
-        processManager.scanForExternalServices(store.tasksUnder(path: folder))
-        importToast = "Imported \(resolved.tasks.count) task\(resolved.tasks.count == 1 ? "" : "s") into '\(folder)'"
-        switchToProject(folder)
+        processManager.scanForExternalServices(store.tasksUnder(path: targetFolder))
+        importToast = (targetFolder == folder)
+            ? "Imported \(resolved.tasks.count) task\(resolved.tasks.count == 1 ? "" : "s") into '\(targetFolder)'"
+            : "Added new tab '\(targetFolder)' (\(resolved.tasks.count) task\(resolved.tasks.count == 1 ? "" : "s"))"
+        switchToProject(targetFolder)
     }
 
     // MARK: - Detail pane
@@ -891,6 +1027,9 @@ struct ContentView: View {
                 // ProcessManager — re-mount on task switch is fine here.
                 ClaudeDetailView(task: task, processManager: processManager)
                     .id("claude-\(id)")
+            } else if task.isGithub {
+                GitHubView(task: task, gitManager: gitManager)
+                    .id("github-\(id)")
             } else {
                 // No `.id` here: OutputView swaps the terminalView in-place so
                 // SwiftTerm's scroll position survives task switches.
@@ -996,19 +1135,48 @@ struct ContentView: View {
         let id = task.id
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Circle()
-                    .fill(processManager.status(id).color)
-                    .frame(width: 8, height: 8)
-                Text(task.name)
+                if !task.isBrowser {
+                    Circle()
+                        .fill(processManager.status(id).color)
+                        .frame(width: 8, height: 8)
+                } else {
+                    Image(systemName: "globe")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.blue)
+                }
+                Text(task.name.isEmpty ? (task.url ?? "Browser") : task.name)
                     .font(.headline)
                     .lineLimit(1)
-                Text("·")
-                    .foregroundStyle(.secondary)
-                Text(processManager.status(id).label)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                if !task.isBrowser {
+                    Text("·")
+                        .foregroundStyle(.secondary)
+                    Text(processManager.status(id).label)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                } else if let url = task.url, !url.isEmpty, !task.name.isEmpty {
+                    Text("·")
+                        .foregroundStyle(.secondary)
+                    Text(url)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
 
                 Spacer()
+
+                if task.isBrowser, let urlString = task.url, !urlString.isEmpty {
+                    Button {
+                        TaskRow.openExternal(urlString)
+                    } label: {
+                        Label("Open externally", systemImage: "arrow.up.right.square")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(.purple)
+                    .help("Open URL in the default external browser")
+                }
 
                 if let port = task.port {
                     Button {
@@ -1239,7 +1407,7 @@ struct EditTaskSheet: View {
     @State private var showIconPicker: Bool = false
 
     enum TaskKind: String, CaseIterable, Identifiable {
-        case service, shortcut, claude, quick
+        case service, shortcut, claude, quick, browser, github
         var id: String { rawValue }
         var label: String {
             switch self {
@@ -1247,6 +1415,8 @@ struct EditTaskSheet: View {
             case .shortcut: return "Shortcut"
             case .claude:   return "Claude"
             case .quick:    return "Quick"
+            case .browser:  return "Browser"
+            case .github:   return "GitHub"
             }
         }
         var iconName: String {
@@ -1255,6 +1425,8 @@ struct EditTaskSheet: View {
             case .shortcut: return "arrow.right.circle.fill"
             case .claude:   return "sparkles"
             case .quick:    return "bolt.fill"
+            case .browser:  return "globe"
+            case .github:   return "chevron.left.forwardslash.chevron.right"
             }
         }
         var detail: String {
@@ -1267,6 +1439,10 @@ struct EditTaskSheet: View {
                 return "Pinned at the top of the sidebar. Each click opens a fresh terminal session — good for keeping multiple Claude chats in the same dir."
             case .quick:
                 return "Surfaced as a chip above the sidebar. One click runs the command and shows its output; click again to stop. No port / URL config."
+            case .browser:
+                return "URL-only bookmark. Clicking the row opens the page in Heart's built-in browser; an arrow icon next to it opens the URL in your default external browser."
+            case .github:
+                return "Git repository panel — GitHub Desktop style. Sidebar row shows branch + dirty count; clicking opens changed files (left) + diff (right) + commit bar (bottom) + push/pull (top). Only `cwd` is required."
             }
         }
     }
@@ -1284,7 +1460,9 @@ struct EditTaskSheet: View {
         _autoStart = State(initialValue: task.autoStart)
         let initialKind: TaskKind = task.isClaudeShortcut ? .claude
             : (task.isQuickAction ? .quick
-               : (task.isShortcut ? .shortcut : .service))
+               : (task.isShortcut ? .shortcut
+                  : (task.isBrowser ? .browser
+                     : (task.isGithub ? .github : .service))))
         _taskKind = State(initialValue: initialKind)
         _icon = State(initialValue: task.icon)
     }
@@ -1322,15 +1500,29 @@ struct EditTaskSheet: View {
                               hint: "Top-level segment becomes the tab name. Use \"/\" for sub-folders, e.g. Backend/Workers.") {
                             styledTextField(placeholder: "Project 1", text: $folder)
                         }
-                        field(label: "Command",
-                              hint: "Runs in zsh -l -i inside a PTY.") {
-                            styledTextField(placeholder: "npm run dev",
-                                            text: $command,
-                                            monospaced: true)
-                        }
-                        field(label: "Working directory",
-                              hint: "Where the command runs. Tilde (~) expands to your home folder.") {
-                            directoryRow
+                        if taskKind == .browser {
+                            field(label: "URL",
+                                  hint: "Required. Loaded in Heart's built-in browser when this row is selected.") {
+                                styledTextField(placeholder: "https://example.com",
+                                                text: $url,
+                                                monospaced: true)
+                            }
+                        } else if taskKind == .github {
+                            field(label: "Repository path",
+                                  hint: "Required. Path to the local git working directory. Tilde (~) expands to your home folder.") {
+                                directoryRow
+                            }
+                        } else {
+                            field(label: "Command",
+                                  hint: "Runs in zsh -l -i inside a PTY.") {
+                                styledTextField(placeholder: "npm run dev",
+                                                text: $command,
+                                                monospaced: true)
+                            }
+                            field(label: "Working directory",
+                                  hint: "Where the command runs. Tilde (~) expands to your home folder.") {
+                                directoryRow
+                            }
                         }
                     }
 
@@ -1592,9 +1784,18 @@ struct EditTaskSheet: View {
         // we only require one of the two so users can ship icon-only chips.
         let hasIdentity = !name.trimmingCharacters(in: .whitespaces).isEmpty
             || !(icon ?? "").trimmingCharacters(in: .whitespaces).isEmpty
-        let hasCommand = !command.trimmingCharacters(in: .whitespaces).isEmpty
         let hasCwd = !cwd.trimmingCharacters(in: .whitespaces).isEmpty
-        return hasIdentity && hasCommand && hasCwd
+        switch taskKind {
+        case .browser:
+            // Browser bookmarks require only identity + a URL.
+            return hasIdentity && !url.trimmingCharacters(in: .whitespaces).isEmpty
+        case .github:
+            // GitHub repos require only identity + a working directory.
+            return hasIdentity && hasCwd
+        default:
+            let hasCommand = !command.trimmingCharacters(in: .whitespaces).isEmpty
+            return hasIdentity && hasCommand && hasCwd
+        }
     }
 
     private func commit() {
@@ -1608,18 +1809,38 @@ struct EditTaskSheet: View {
             case .shortcut: return "shortcut"
             case .claude:   return "claude"
             case .quick:    return "quick"
+            case .browser:  return "browser"
+            case .github:   return "github"
             }
         }()
-        // Port / URL only apply to long-running services — strip them on the
-        // other kinds so a user who toggled the type doesn't leave dead config
-        // behind in the JSON.
+        // Port / URL only apply to long-running services or browser bookmarks —
+        // strip them on the other kinds so a user who toggled the type doesn't
+        // leave dead config behind in the JSON.
         let resolvedPort: Int? = (taskKind == .service) ? port : nil
-        let resolvedURL: String? = (taskKind == .service && !trimmedURL.isEmpty) ? trimmedURL : nil
+        let resolvedURL: String? = {
+            guard !trimmedURL.isEmpty else { return nil }
+            return (taskKind == .service || taskKind == .browser) ? trimmedURL : nil
+        }()
+        // Browser bookmarks store a `:` placeholder so the required-field
+        // contract is met; github stores empty command (its JSON shape omits
+        // the field entirely — DevTask decoder is fine with a blank default).
+        let resolvedCommand: String = {
+            switch taskKind {
+            case .browser: return ":"
+            case .github:  return ""
+            default:       return command.trimmingCharacters(in: .whitespaces)
+            }
+        }()
+        let resolvedCwd: String = (taskKind == .browser)
+            ? (cwd.trimmingCharacters(in: .whitespaces).isEmpty
+               ? NSHomeDirectory()
+               : cwd.trimmingCharacters(in: .whitespaces))
+            : cwd.trimmingCharacters(in: .whitespaces)
         let updated = DevTask(
             id: task.id,
             name: name.trimmingCharacters(in: .whitespaces),
-            command: command.trimmingCharacters(in: .whitespaces),
-            cwd: cwd.trimmingCharacters(in: .whitespaces),
+            command: resolvedCommand,
+            cwd: resolvedCwd,
             port: resolvedPort,
             url: resolvedURL,
             autoStart: autoStart,
@@ -1694,6 +1915,11 @@ struct PendingReplace: Identifiable {
     let project: String
     let tasks: [DevTask]
     let sourceURL: URL
+    /// One-line summary like "2 added · 1 removed · 3 modified", or
+    /// "No changes" when disk matches memory. Surfaced in the confirm alert
+    /// so the user can decide whether the reload is worth it. nil = caller
+    /// didn't compute it (e.g. fresh import, not a reload).
+    var diffSummary: String?
 }
 
 struct RenameRequest: Identifiable {

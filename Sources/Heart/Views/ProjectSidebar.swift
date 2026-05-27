@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 struct ProjectSidebar: View {
     @ObservedObject var store: TaskStore
     @ObservedObject var processManager: ProcessManager
+    @ObservedObject var gitManager: GitManager
 
     /// Currently active project. `nil` (no projects yet) is handled by the parent
     /// (welcome screen); this view assumes a non-nil value.
@@ -37,6 +38,16 @@ struct ProjectSidebar: View {
     let onQuickTap: (DevTask) -> Void
     /// Create a blank quick-action task (opens the edit sheet pre-filled, kind=quick).
     let onAddQuickAction: () -> Void
+    /// Create a blank browser-kind task (opens edit sheet, kind=browser).
+    let onAddBrowser: () -> Void
+    /// Create a blank github-kind task (opens edit sheet, kind=github).
+    let onAddGithub: () -> Void
+    /// Instantiate the given bookmark as a browser task in the current project.
+    let onPickBookmark: (Bookmark) -> Void
+    /// Persist a browser task's current URL/name as a global bookmark.
+    let onSaveBookmark: (DevTask) -> Void
+    /// Remove a saved bookmark from the global library.
+    let onDeleteBookmark: (Bookmark) -> Void
     /// Create a new folder. Argument is the parent path; empty string means
     /// "at the project root" (callers should prepend the project name).
     let onAddFolder: (String) -> Void
@@ -54,6 +65,9 @@ struct ProjectSidebar: View {
     let isDirty: Bool
     /// Save the project back to its linked source file.
     let onSaveSource: () -> Void
+    /// Re-read the linked source file from disk and prompt the user to
+    /// confirm overwrite. Surfaced from the sourceBar's filename menu.
+    let onReloadSource: () -> Void
 
     @State private var isDropTargeted = false
 
@@ -98,17 +112,30 @@ struct ProjectSidebar: View {
                 .font(.system(size: 10))
                 .foregroundStyle(path != nil ? Color.accentColor : .secondary)
             if let path {
-                Text((path as NSString).lastPathComponent)
-                    .font(.system(size: 10, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(.secondary)
-                    .help(path)
-                    .onTapGesture {
+                Menu {
+                    Button {
+                        onReloadSource()
+                    } label: {
+                        Label("Reload from disk", systemImage: "arrow.clockwise")
+                    }
+                    Button {
                         NSWorkspace.shared.activateFileViewerSelecting(
                             [URL(fileURLWithPath: path)]
                         )
+                    } label: {
+                        Label("Show in Finder", systemImage: "folder")
                     }
+                } label: {
+                    Text((path as NSString).lastPathComponent)
+                        .font(.system(size: 10, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(path)
                 if isDirty {
                     Button {
                         onSaveSource()
@@ -170,11 +197,103 @@ struct ProjectSidebar: View {
             }
             .buttonStyle(.plain)
             .help("Add a task to '\(project)'")
+            addBrowserControl
+            addGithubControl
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.05))
+    }
+
+    // MARK: - GitHub quick-add
+
+    @ViewBuilder
+    private var addGithubControl: some View {
+        Button {
+            onAddGithub()
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 10))
+                Image(systemName: "plus")
+                    .font(.system(size: 9, weight: .bold))
+            }
+            .foregroundStyle(Color.purple)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Add a git repository to '\(project)'")
+    }
+
+    // MARK: - Browser quick-add
+
+    /// "+ Browser" entry point. Plain button when no saved bookmarks exist
+    /// (clicking opens a fresh edit sheet). Menu when bookmarks exist —
+    /// listing them above "New URL…" so the user can pin a recurring URL
+    /// once and add it to any project with one click.
+    @ViewBuilder
+    private var addBrowserControl: some View {
+        let bookmarks = store.bookmarks
+        if bookmarks.isEmpty {
+            Button {
+                onAddBrowser()
+            } label: {
+                addBrowserLabel
+            }
+            .buttonStyle(.plain)
+            .help("Add a browser bookmark to '\(project)'")
+        } else {
+            Menu {
+                Button {
+                    onAddBrowser()
+                } label: {
+                    Label("New URL…", systemImage: "plus")
+                }
+                Divider()
+                Section("Bookmarks") {
+                    ForEach(bookmarks) { mark in
+                        Menu {
+                            Button {
+                                onPickBookmark(mark)
+                            } label: {
+                                Label("Add to '\(project)'", systemImage: "plus")
+                            }
+                            Divider()
+                            Button(role: .destructive) {
+                                onDeleteBookmark(mark)
+                            } label: {
+                                Label("Remove from bookmarks", systemImage: "trash")
+                            }
+                        } label: {
+                            Label(mark.name.isEmpty ? mark.url : mark.name,
+                                  systemImage: mark.icon?.isEmpty == false ? mark.icon! : "globe")
+                        }
+                    }
+                }
+            } label: {
+                addBrowserLabel
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Add a browser bookmark to '\(project)'")
+        }
+    }
+
+    private var addBrowserLabel: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "globe")
+                .font(.system(size: 10))
+            Image(systemName: "plus")
+                .font(.system(size: 9, weight: .bold))
+        }
+        .foregroundStyle(Color.accentColor)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
     }
 
     // MARK: - Quick actions bar
@@ -321,6 +440,17 @@ struct ProjectSidebar: View {
                     }
                     selectedTaskId = task.id
                 }
+            } else if task.isBrowser {
+                BrowserRow(task: task,
+                           isSelected: selectedTaskId == task.id) {
+                    onShowBrowser(task)
+                }
+            } else if task.isGithub {
+                GitHubRow(task: task,
+                          isSelected: selectedTaskId == task.id,
+                          gitManager: gitManager) {
+                    selectedTaskId = task.id
+                }
             } else {
                 TaskRow(task: task,
                         processManager: processManager,
@@ -331,6 +461,8 @@ struct ProjectSidebar: View {
         .contextMenu {
             if task.isClaudeShortcut { claudeRowMenu(for: task) }
             else if task.isShortcut { shortcutRowMenu(for: task) }
+            else if task.isBrowser { browserRowMenu(for: task) }
+            else if task.isGithub { githubRowMenu(for: task) }
             else { rowMenu(for: task) }
         }
     }
@@ -499,6 +631,76 @@ struct ProjectSidebar: View {
     }
 
     @ViewBuilder
+    private func browserRowMenu(for task: DevTask) -> some View {
+        let urlString = task.url ?? ""
+        Button {
+            onShowBrowser(task)
+        } label: {
+            Label("Open in built-in browser", systemImage: "globe")
+        }
+        Button {
+            TaskRow.openExternal(urlString)
+        } label: {
+            Label("Open in default browser", systemImage: "arrow.up.right.square")
+        }
+        .disabled(urlString.isEmpty)
+        Divider()
+        Button { onEdit(task) } label: { Label("Edit…", systemImage: "pencil") }
+        moveToMenu(for: task)
+        Button { onDuplicate(task) } label: {
+            Label("Duplicate", systemImage: "plus.square.on.square")
+        }
+        Button {
+            onSaveBookmark(task)
+        } label: {
+            Label("Save as bookmark", systemImage: "bookmark")
+        }
+        .disabled(urlString.isEmpty)
+        Divider()
+        Button(role: .destructive) { onDelete(task) } label: {
+            Label("Delete", systemImage: "trash")
+        }
+    }
+
+    @ViewBuilder
+    private func githubRowMenu(for task: DevTask) -> some View {
+        Button {
+            Task { await gitManager.refresh(taskId: task.id, cwd: task.cwd) }
+        } label: {
+            Label("Refresh status", systemImage: "arrow.clockwise")
+        }
+        Button {
+            Task { await gitManager.pull(taskId: task.id, cwd: task.cwd) }
+        } label: {
+            Label("Pull (ff-only)", systemImage: "arrow.down.circle")
+        }
+        Button {
+            Task { await gitManager.push(taskId: task.id, cwd: task.cwd) }
+        } label: {
+            Label("Push", systemImage: "arrow.up.circle")
+        }
+        Divider()
+        Button {
+            let expanded = GitManager.expand(task.cwd)
+            NSWorkspace.shared.activateFileViewerSelecting(
+                [URL(fileURLWithPath: expanded)]
+            )
+        } label: {
+            Label("Show in Finder", systemImage: "folder")
+        }
+        Divider()
+        Button { onEdit(task) } label: { Label("Edit…", systemImage: "pencil") }
+        moveToMenu(for: task)
+        Button { onDuplicate(task) } label: {
+            Label("Duplicate", systemImage: "plus.square.on.square")
+        }
+        Divider()
+        Button(role: .destructive) { onDelete(task) } label: {
+            Label("Delete", systemImage: "trash")
+        }
+    }
+
+    @ViewBuilder
     private func claudeRowMenu(for task: DevTask) -> some View {
         Button {
             onResumeClaude(task)
@@ -633,24 +835,27 @@ struct ProjectSidebar: View {
             }
             .buttonStyle(.plain)
 
-            HStack(spacing: 6) {
-                folderIconButton(systemName: "play.fill", tint: .green,
-                                 help: "Start all tasks in folder",
-                                 enabled: hasStartable(allTasks)) {
-                    processManager.startAll(allTasks)
+            let runnableTasks = runnable(allTasks)
+            if !runnableTasks.isEmpty {
+                HStack(spacing: 6) {
+                    folderIconButton(systemName: "play.fill", tint: .green,
+                                     help: "Start all tasks in folder",
+                                     enabled: hasStartable(allTasks)) {
+                        processManager.startAll(runnableTasks)
+                    }
+                    folderIconButton(systemName: "stop.fill", tint: .red,
+                                     help: "Stop all tasks in folder",
+                                     enabled: hasStoppable(allTasks)) {
+                        processManager.stopAll(runnableTasks)
+                    }
+                    folderIconButton(systemName: "arrow.clockwise", tint: .secondary,
+                                     help: "Restart all tasks in folder",
+                                     enabled: true) {
+                        for task in runnableTasks { processManager.restart(task) }
+                    }
                 }
-                folderIconButton(systemName: "stop.fill", tint: .red,
-                                 help: "Stop all tasks in folder",
-                                 enabled: hasStoppable(allTasks)) {
-                    processManager.stopAll(allTasks)
-                }
-                folderIconButton(systemName: "arrow.clockwise", tint: .secondary,
-                                 help: "Restart all tasks in folder",
-                                 enabled: !allTasks.isEmpty) {
-                    for task in allTasks { processManager.restart(task) }
-                }
+                .fixedSize()
             }
-            .fixedSize()
         }
         .padding(.vertical, 4)
         .padding(.leading, CGFloat(depth * 14))
@@ -663,16 +868,19 @@ struct ProjectSidebar: View {
             Button { onRenameFolder(node.path) } label: {
                 Label("Rename folder…", systemImage: "pencil")
             }
-            Divider()
-            Button { processManager.startAll(allTasks) } label: {
-                Label("Start all", systemImage: "play.fill")
-            }.disabled(!hasStartable(allTasks))
-            Button { processManager.stopAll(allTasks) } label: {
-                Label("Stop all", systemImage: "stop.fill")
-            }.disabled(!hasStoppable(allTasks))
-            Button { for task in allTasks { processManager.restart(task) } } label: {
-                Label("Restart all", systemImage: "arrow.clockwise")
-            }.disabled(allTasks.isEmpty)
+            let runnableTasks = runnable(allTasks)
+            if !runnableTasks.isEmpty {
+                Divider()
+                Button { processManager.startAll(runnableTasks) } label: {
+                    Label("Start all", systemImage: "play.fill")
+                }.disabled(!hasStartable(allTasks))
+                Button { processManager.stopAll(runnableTasks) } label: {
+                    Label("Stop all", systemImage: "stop.fill")
+                }.disabled(!hasStoppable(allTasks))
+                Button { for task in runnableTasks { processManager.restart(task) } } label: {
+                    Label("Restart all", systemImage: "arrow.clockwise")
+                }
+            }
             Divider()
             if let sourcePath = store.bundleSource(forFolder: node.path) {
                 Button {
@@ -723,10 +931,18 @@ struct ProjectSidebar: View {
     }
 
     private func hasStartable(_ tasks: [DevTask]) -> Bool {
-        tasks.contains { !processManager.status($0.id).isRunning }
+        runnable(tasks).contains { !processManager.status($0.id).isRunning }
     }
     private func hasStoppable(_ tasks: [DevTask]) -> Bool {
-        tasks.contains { processManager.status($0.id).isRunning }
+        runnable(tasks).contains { processManager.status($0.id).isRunning }
+    }
+
+    /// Tasks the folder header's start/stop/restart buttons should act on.
+    /// Excludes kinds that never spawn a process (browser bookmarks, github
+    /// repo panels) — without this filter the buttons would render on a folder
+    /// of repos with nothing useful to do.
+    private func runnable(_ tasks: [DevTask]) -> [DevTask] {
+        tasks.filter { !$0.isBrowser && !$0.isGithub }
     }
 
     // MARK: - Drop overlay

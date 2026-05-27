@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct TaskRow: View {
     let task: DevTask
@@ -44,11 +45,18 @@ struct TaskRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 10) {
-                if task.url != nil, let onShowBrowser {
-                    iconButton(systemName: "globe",
-                               tint: .blue,
-                               help: "Open URL in built-in browser") {
-                        onShowBrowser()
+                if let urlString = task.url, !urlString.isEmpty {
+                    if let onShowBrowser {
+                        iconButton(systemName: "globe",
+                                   tint: .blue,
+                                   help: "Open URL in built-in browser") {
+                            onShowBrowser()
+                        }
+                    }
+                    iconButton(systemName: "arrow.up.right.square",
+                               tint: .purple,
+                               help: "Open URL in default external browser") {
+                        Self.openExternal(urlString)
                     }
                 }
 
@@ -117,6 +125,16 @@ struct TaskRow: View {
         .buttonStyle(.plain)
         .help(helpText)
         .disabled(status == .stopping)
+    }
+
+    static func openExternal(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let resolved: URL? = trimmed.contains("://")
+            ? URL(string: trimmed)
+            : URL(string: "http://" + trimmed)
+        guard let url = resolved else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @ViewBuilder
