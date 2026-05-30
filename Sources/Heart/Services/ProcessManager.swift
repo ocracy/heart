@@ -50,7 +50,14 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         if let view = terminalViews[taskId] {
             return view
         }
-        let view = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        // Start at a generous initial frame so SwiftTerm's processSizeChange
+        // computes a sane cols/rows (≈140×42 at 12pt monospace) before the
+        // container view lays out. The child process inherits this as its
+        // PTY winsize on startProcess, so commands that probe terminal width
+        // at spawn time (`claude`, `tput cols`, anything reading $COLUMNS)
+        // see a real number instead of the 80×24 fallback — or worse, 0×0
+        // when the container is still pre-layout.
+        let view = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 1200, height: 720))
         view.processDelegate = self
         view.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         view.nativeBackgroundColor = NSColor(calibratedWhite: 0.10, alpha: 1.0)
@@ -111,12 +118,30 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         // Wrap in a login+interactive zsh so the user's PATH/aliases load (.zprofile + .zshrc).
         // Single-quote the cwd; escape any literal single quotes inside (rare in real paths).
         let escapedCwd = expandedCwd.replacingOccurrences(of: "'", with: "'\\''")
-        let wrapped = "cd '\(escapedCwd)' && \(task.command)"
+        // Force the PTY's winsize to match what SwiftTerm thinks the terminal
+        // is *right now*, before any user command runs. SwiftTerm sets winsize
+        // via TIOCSWINSZ during startProcess, but on the very first spawn the
+        // container view may still be 0×0 (SwiftUI hasn't laid out yet) so
+        // the child sees an absurd size, and tools like `claude` cache that
+        // value at startup. The leading `stty` re-stamps a sane size from
+        // inside the spawned shell; SwiftTerm's later resize-on-layout still
+        // wins because TIOCSWINSZ takes precedence over a one-shot stty.
+        let cols = max(80, view.getTerminal().cols)
+        let rows = max(24, view.getTerminal().rows)
+        let wrapped = "stty cols \(cols) rows \(rows) 2>/dev/null; cd '\(escapedCwd)' && \(task.command)"
+
+        // Inject COLUMNS/LINES alongside SwiftTerm's PTY winsize. zsh's TRAPWINCH
+        // updates COLUMNS/LINES on SIGWINCH, but for tools that read these once
+        // at spawn (some Node CLIs, status-line libs) the initial values matter —
+        // without them they fall back to 80×24 and start drawing as if narrow.
+        var perTaskEnv = spawnEnvironment
+        perTaskEnv.append("COLUMNS=\(cols)")
+        perTaskEnv.append("LINES=\(rows)")
 
         view.startProcess(
             executable: "/bin/zsh",
             args: ["-l", "-i", "-c", wrapped],
-            environment: spawnEnvironment,
+            environment: perTaskEnv,
             execName: nil
         )
 

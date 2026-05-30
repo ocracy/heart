@@ -46,12 +46,37 @@ final class TerminalContainerView: NSView {
         // Force a redraw once the view is on-screen — SwiftTerm sometimes
         // shows a stale / empty canvas right after a re-attach even though
         // the buffer is still populated. Doing this async lets the view
-        // settle into its window first.
-        DispatchQueue.main.async { [weak tv] in
-            guard let view = tv, let window = view.window else { return }
+        // settle into its window first. We also re-trigger `setFrameSize` to
+        // guarantee SwiftTerm's processSizeChange runs (which calls
+        // `terminal.resize(cols:rows:)` AND TIOCSWINSZ on the child PTY).
+        // Without this, attach swaps between containers can leave the child
+        // process thinking the terminal is still its old (sometimes 0×0)
+        // size — the symptom is Claude Code etc. drawing each character on
+        // its own line, as if cols=1.
+        DispatchQueue.main.async { [weak tv, weak self] in
+            guard let view = tv, let self = self, let window = view.window else { return }
+            let target = self.bounds.size
+            if target.width > 0 && target.height > 0 {
+                // Setting to .zero then back forces processSizeChange to fire
+                // even when the size hasn't numerically changed since attach.
+                view.setFrameSize(target)
+            }
             window.makeFirstResponder(view)
             view.needsDisplay = true
             view.getTerminal().refresh(startRow: 0, endRow: view.getTerminal().rows)
+        }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        // Container resized (window drag, split-view drag, sidebar toggle…).
+        // Forward the new size to SwiftTerm so it re-runs processSizeChange
+        // even if autoresizingMask alone fails to trigger it (which it can on
+        // first show, before the view tree is in a window). This is the path
+        // that keeps `claude` from getting stuck with stale cols/rows after
+        // the user changes layout.
+        if let tv = currentTerminal, newSize.width > 0, newSize.height > 0 {
+            tv.setFrameSize(newSize)
         }
     }
 }
