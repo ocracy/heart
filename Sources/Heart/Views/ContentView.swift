@@ -61,6 +61,9 @@ struct ContentView: View {
     @State private var addFolderTarget: AddFolderRequest?
     @State private var renameFolderTarget: RenameFolderRequest?
     @State private var resumeClaudeTarget: DevTask?
+    /// Toggled by the detail-bar "+" → "Manage paths…" entry. Drives a sheet
+    /// where the user can rename / re-target / delete saved terminal cwds.
+    @State private var showTerminalShortcuts = false
     /// Toggled by the "Edit" toolbar button. When on, the sidebar surfaces
     /// drag handles so the user can reorder tasks + folders. Off by default
     /// so the normal view stays uncluttered.
@@ -116,6 +119,10 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showFormatHelp) {
             JSONFormatHelp(onClose: { showFormatHelp = false })
+        }
+        .sheet(isPresented: $showTerminalShortcuts) {
+            TerminalShortcutsSheet(store: store,
+                                   onClose: { showTerminalShortcuts = false })
         }
         .sheet(item: $addFolderTarget) { req in
             AddFolderPrompt(
@@ -1210,11 +1217,121 @@ struct ContentView: View {
                     tabPill(tab: tab, isActive: tab == active, taskId: id)
                 }
                 Spacer()
+                terminalPlusMenu(project: projectOf(task: task))
             }
             .padding(.horizontal, 10)
             .padding(.bottom, 6)
         }
         .background(.ultraThinMaterial)
+    }
+
+    /// "+" pill on the right of the detail-bar tab strip. Spawns a fresh
+    /// terminal task in the current project from a saved cwd, or lets the
+    /// user pick a brand-new one. Multiple taps on the same entry are
+    /// intentional — each spawn creates a separate row + PTY.
+    @ViewBuilder
+    private func terminalPlusMenu(project: String?) -> some View {
+        Menu {
+            if store.terminalShortcuts.isEmpty {
+                Text("No saved paths yet")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Divider()
+            } else {
+                ForEach(store.terminalShortcuts) { shortcut in
+                    Button {
+                        spawnTerminal(in: project, shortcut: shortcut)
+                    } label: {
+                        Label(shortcut.displayName, systemImage: "terminal")
+                    }
+                }
+                Divider()
+            }
+            Button {
+                pickAndAddTerminalPath(spawnAfter: project)
+            } label: {
+                Label("Browse for new path…", systemImage: "folder.badge.plus")
+            }
+            Button {
+                showTerminalShortcuts = true
+            } label: {
+                Label("Manage paths…", systemImage: "slider.horizontal.3")
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.accentColor.opacity(0.45),
+                                style: StrokeStyle(lineWidth: 0.8, dash: [3, 2]))
+                )
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Open a new terminal at a saved path")
+    }
+
+    /// Find which top-level project a task belongs to so a freshly-spawned
+    /// terminal lands next to its siblings, not at the root of some unrelated
+    /// project (e.g. when the user has the same task selected across switches).
+    private func projectOf(task: DevTask) -> String? {
+        guard let folder = task.folder, !folder.isEmpty else {
+            return selectedProject
+        }
+        return folder.split(separator: "/").first.map(String.init) ?? selectedProject
+    }
+
+    /// Create a brand-new shortcut-kind DevTask whose only job is to render a
+    /// terminal at the given cwd. Routes through `store.upsert` so the new row
+    /// shows up in the sidebar immediately, and selects it so the detail pane
+    /// switches to its PTY.
+    private func spawnTerminal(in project: String?, shortcut: TerminalShortcut) {
+        let projectName = project ?? selectedProject ?? store.orderedProjects.first
+        guard let projectName else { return }
+        let expanded = (shortcut.path as NSString).expandingTildeInPath
+        let label = shortcut.displayName
+        let task = DevTask(
+            id: "terminal-\(UUID().uuidString.prefix(8))",
+            name: label,
+            command: "exec zsh -l -i",
+            cwd: expanded,
+            port: nil,
+            url: nil,
+            autoStart: false,
+            folder: projectName,
+            kind: "shortcut",
+            icon: "terminal"
+        )
+        store.upsert(task)
+        selectedProject = projectName
+        selectedTaskId = task.id
+        activeTabs[task.id] = .terminal
+        processManager.start(task)
+    }
+
+    /// File picker → save the chosen directory as a TerminalShortcut and
+    /// (optionally) spawn a terminal at it right away. Saves only — repeated
+    /// browsing for the same path silently de-dups via `addTerminalShortcut`.
+    private func pickAndAddTerminalPath(spawnAfter project: String?) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use as terminal path"
+        if panel.runModal() == .OK, let url = panel.url {
+            let path = url.path
+            let basename = url.lastPathComponent
+            _ = store.addTerminalShortcut(name: basename, path: path)
+            if let id = store.terminalShortcuts.first(where: { $0.path == path })?.id,
+               let shortcut = store.terminalShortcuts.first(where: { $0.id == id }) {
+                spawnTerminal(in: project, shortcut: shortcut)
+            }
+        }
     }
 
     @ViewBuilder

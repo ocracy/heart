@@ -18,6 +18,32 @@ struct Bookmark: Codable, Identifiable, Hashable {
     }
 }
 
+/// A saved cwd that the detail-bar "+" button can spawn a fresh terminal at.
+/// Cross-project, persisted globally in `terminal-shortcuts.json` — these
+/// follow the user, not any one project. `name` is purely cosmetic (defaults
+/// to the path basename when blank).
+struct TerminalShortcut: Codable, Identifiable, Hashable {
+    var id: String
+    var name: String
+    var path: String
+
+    init(id: String = UUID().uuidString, name: String = "", path: String) {
+        self.id = id
+        self.name = name
+        self.path = path
+    }
+
+    /// User-facing label. Falls back to the cwd basename so blank entries
+    /// don't render as empty rows in the "+ Terminal" menu.
+    var displayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        let expanded = (path as NSString).expandingTildeInPath
+        let base = (expanded as NSString).lastPathComponent
+        return base.isEmpty ? path : base
+    }
+}
+
 /// On-disk shape of a single project file (`projects/<id>.json`). Each project
 /// is fully self-contained: its tasks, its imported source path, its own
 /// folder ordering and explicitly-remembered (empty) subfolders. Folder strings
@@ -86,6 +112,10 @@ final class TaskStore: ObservableObject {
     /// Saved URL library shown in the "+ Browser" menu. Cross-project, persisted
     /// globally to `bookmarks.json` so the list survives project deletions.
     @Published var bookmarks: [Bookmark] = []
+    /// Saved cwds for the detail-bar "+" → Terminal menu. Cross-project,
+    /// persisted globally to `terminal-shortcuts.json`. Lets the user spawn
+    /// throwaway terminals at a known directory with one click.
+    @Published var terminalShortcuts: [TerminalShortcut] = []
 
     static let defaultProjectName = "Project 1"
 
@@ -96,6 +126,7 @@ final class TaskStore: ObservableObject {
     private let foldersURL: URL         // legacy folders.json (post-migration: split into ProjectFile.rememberedFolders)
     private let folderOrderURL: URL     // legacy folder-order.json (post-migration: split into ProjectFile.folderOrder)
     private let bookmarksURL: URL
+    private let terminalShortcutsURL: URL
     private let projectsDir: URL        // per-project files live here
     private let trashDir: URL           // deleted projects archived here
 
@@ -118,6 +149,7 @@ final class TaskStore: ObservableObject {
         self.foldersURL = dir.appendingPathComponent("folders.json")
         self.folderOrderURL = dir.appendingPathComponent("folder-order.json")
         self.bookmarksURL = dir.appendingPathComponent("bookmarks.json")
+        self.terminalShortcutsURL = dir.appendingPathComponent("terminal-shortcuts.json")
         self.projectsDir = dir.appendingPathComponent("projects", isDirectory: true)
         self.trashDir = self.projectsDir.appendingPathComponent(".trash", isDirectory: true)
 
@@ -133,6 +165,7 @@ final class TaskStore: ObservableObject {
         }
 
         loadBookmarks()
+        loadTerminalShortcuts()
         // Per-project files: if `projects/` exists, that's the truth. Otherwise
         // migrate the legacy single tasks.json into per-project files.
         if fm.fileExists(atPath: projectsDir.path) {
@@ -382,6 +415,58 @@ final class TaskStore: ObservableObject {
     func removeBookmark(id: String) {
         bookmarks.removeAll { $0.id == id }
         saveBookmarks()
+    }
+
+    // MARK: - Terminal shortcuts (cwds for the detail-bar "+" → Terminal menu)
+
+    private func loadTerminalShortcuts() {
+        guard let data = try? Data(contentsOf: terminalShortcutsURL),
+              let decoded = try? JSONDecoder().decode([TerminalShortcut].self, from: data) else {
+            return
+        }
+        self.terminalShortcuts = decoded
+    }
+
+    private func saveTerminalShortcuts() {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(terminalShortcuts)
+            try data.write(to: terminalShortcutsURL, options: .atomic)
+        } catch {
+            NSLog("[TaskStore] saveTerminalShortcuts failed: %@", "\(error)")
+        }
+    }
+
+    /// Append a new shortcut. De-duped by trimmed path — re-adding the same
+    /// path just updates the existing entry's name in place. Returns the id
+    /// of the (new or updated) shortcut.
+    @discardableResult
+    func addTerminalShortcut(name: String, path: String) -> String? {
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else { return nil }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let idx = terminalShortcuts.firstIndex(where: { $0.path == trimmedPath }) {
+            if !trimmedName.isEmpty { terminalShortcuts[idx].name = trimmedName }
+            saveTerminalShortcuts()
+            return terminalShortcuts[idx].id
+        }
+        let shortcut = TerminalShortcut(name: trimmedName, path: trimmedPath)
+        terminalShortcuts.append(shortcut)
+        saveTerminalShortcuts()
+        return shortcut.id
+    }
+
+    func updateTerminalShortcut(id: String, name: String, path: String) {
+        guard let idx = terminalShortcuts.firstIndex(where: { $0.id == id }) else { return }
+        terminalShortcuts[idx].name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        terminalShortcuts[idx].path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        saveTerminalShortcuts()
+    }
+
+    func removeTerminalShortcut(id: String) {
+        terminalShortcuts.removeAll { $0.id == id }
+        saveTerminalShortcuts()
     }
 
     private func loadRememberedFolders() {

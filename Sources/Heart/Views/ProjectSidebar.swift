@@ -300,43 +300,140 @@ struct ProjectSidebar: View {
 
     @ViewBuilder
     private var quickActionsBar: some View {
-        let chips = store.quickActions(forProject: project)
-        if !chips.isEmpty || true {
-            HStack(spacing: 6) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(chips) { task in
-                            quickChip(for: task)
-                        }
+        let allChips = store.quickActions(forProject: project)
+        let (rootChips, folderGroups) = partitionQuickChips(allChips)
+        HStack(spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(rootChips) { task in
+                        quickChip(for: task)
                     }
-                    .padding(.leading, 8)
-                }
-                Button {
-                    onAddQuickAction()
-                } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 9))
-                        Image(systemName: "plus")
-                            .font(.system(size: 9, weight: .bold))
+                    ForEach(folderGroups, id: \.folder) { group in
+                        folderQuickChip(folder: group.folder, chips: group.chips)
                     }
-                    .foregroundStyle(Color.accentColor)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color.accentColor.opacity(0.4),
-                                    style: StrokeStyle(lineWidth: 0.8, dash: [3, 2]))
-                    )
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .help("Add a quick-action chip")
-                .padding(.trailing, 8)
+                .padding(.leading, 8)
             }
-            .padding(.vertical, 5)
-            .background(Color.secondary.opacity(0.03))
+            Button {
+                onAddQuickAction()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 9))
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.accentColor.opacity(0.4),
+                                style: StrokeStyle(lineWidth: 0.8, dash: [3, 2]))
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Add a quick-action chip")
+            .padding(.trailing, 8)
         }
+        .padding(.vertical, 5)
+        .background(Color.secondary.opacity(0.03))
+    }
+
+    /// Split the project's quick chips into "lives at the project root" and
+    /// "lives in a subfolder, grouped by folder name". Order inside each
+    /// bucket follows the store's natural task order so users can rearrange
+    /// chips by editing JSON / using ⌘E reorder.
+    private func partitionQuickChips(_ chips: [DevTask])
+        -> (root: [DevTask], folders: [(folder: String, chips: [DevTask])])
+    {
+        let prefix = project + "/"
+        var root: [DevTask] = []
+        var byFolder: [String: [DevTask]] = [:]
+        var folderOrder: [String] = []
+        for task in chips {
+            let folderRaw = task.folder ?? ""
+            let local: String
+            if folderRaw.isEmpty || folderRaw == project {
+                local = ""
+            } else if folderRaw.hasPrefix(prefix) {
+                local = String(folderRaw.dropFirst(prefix.count))
+            } else {
+                local = folderRaw
+            }
+            if local.isEmpty {
+                root.append(task)
+            } else {
+                if byFolder[local] == nil { folderOrder.append(local) }
+                byFolder[local, default: []].append(task)
+            }
+        }
+        let folders = folderOrder.map { (folder: $0, chips: byFolder[$0] ?? []) }
+        return (root, folders)
+    }
+
+    /// Folder-shaped chip that opens a dropdown showing every quick action
+    /// stored inside that subfolder. Useful when the user has organized
+    /// chips ("Backend", "Mobile") and doesn't want them flat across one row.
+    @ViewBuilder
+    private func folderQuickChip(folder: String, chips: [DevTask]) -> some View {
+        let runningCount = chips.filter { processManager.status($0.id).isRunning }.count
+        Menu {
+            ForEach(chips) { task in
+                Button {
+                    onQuickTap(task)
+                } label: {
+                    let icon = (task.icon?.isEmpty == false) ? task.icon! : "bolt"
+                    let label = task.name.isEmpty ? "(unnamed)" : task.name
+                    Label(label, systemImage: icon)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(runningCount > 0 ? Color.green : Color.accentColor)
+                Text(folderLeaf(folder))
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                if runningCount > 0 {
+                    Text("(\(runningCount))")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Color.green)
+                }
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(runningCount > 0
+                          ? Color.green.opacity(0.18)
+                          : Color.secondary.opacity(0.10))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(runningCount > 0
+                            ? Color.green.opacity(0.55)
+                            : Color.secondary.opacity(0.20),
+                            lineWidth: 0.5)
+            )
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(folder)
+    }
+
+    /// Last path component of a "Frontend/Workers"-shaped folder string —
+    /// the dropdown label stays compact even when the user nests chips deep.
+    private func folderLeaf(_ folder: String) -> String {
+        folder.split(separator: "/").last.map(String.init) ?? folder
     }
 
     @ViewBuilder
