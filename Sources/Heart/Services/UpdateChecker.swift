@@ -33,6 +33,11 @@ final class UpdateChecker: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var lastCheckedAt: Date?
     @Published var sheetPresented: Bool = false
+    /// Human-readable step log surfaced by UpdateView during install. Each
+    /// entry is one line; new entries are appended at the bottom. Wiped at
+    /// the start of every download/install cycle so the user only sees the
+    /// current attempt — older noise just confuses the diagnosis.
+    @Published private(set) var installLog: [String] = []
 
     let currentVersion: String
 
@@ -42,6 +47,34 @@ final class UpdateChecker: ObservableObject {
     private let throttle: TimeInterval = 24 * 60 * 60
 
     private var downloadCoordinator: DownloadCoordinator?
+
+    /// Append one line to `installLog` with a `HH:mm:ss` prefix so the UI
+    /// shows a timeline rather than an unordered dump. Safe to call from
+    /// any thread — the @MainActor hop happens here.
+    private func log(_ message: String) {
+        let ts = Self.logFormatter.string(from: Date())
+        Task { @MainActor in
+            self.installLog.append("[\(ts)] \(message)")
+        }
+        NSLog("[Heart.Updater] %@", message)
+    }
+
+    private static let logFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    /// Hard-exit the process. Last-resort path for the updater UI's "Force
+    /// quit & install" button when the normal NSApp.terminate cycle hangs
+    /// (a child PTY refusing SIGTERM/SIGKILL, or a window controller stuck
+    /// in `applicationShouldTerminate`). The detached helper script is
+    /// already running by the time we get here, so it'll proceed with the
+    /// swap as soon as our pid disappears.
+    func forceQuitNow() {
+        log("forceQuitNow() → exit(0)")
+        Darwin.exit(0)
+    }
 
     private init() {
         self.currentVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
@@ -145,18 +178,33 @@ final class UpdateChecker: ObservableObject {
 
     func downloadAndInstall() async {
         guard case .available(let release) = state else { return }
+        installLog = []
+        log("Download başlatılıyor: \(release.zipURL.absoluteString)")
         state = .downloading(0)
         do {
             let zipURL = try await downloadZip(from: release.zipURL)
+            log("Download tamam: \(zipURL.lastPathComponent)")
             let stagedApp = try unzipStaged(zipURL: zipURL, version: release.version)
+            log("Unzip tamam: \(stagedApp.path)")
             try installAndRelaunch(stagedApp: stagedApp)
+            log("Helper script başlatıldı. Heart kapanıyor…")
             state = .installing
             // Give the user ~half a second to read "Yeniden başlatılıyor…"
-            // before the window disappears.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            // before the window disappears, then ask AppKit to terminate.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.log("NSApp.terminate(nil) çağrılıyor")
                 NSApp.terminate(nil)
             }
+            // Safety net: if AppKit terminate hangs (a child PTY refusing to
+            // die, a window controller blocking applicationShouldTerminate),
+            // hard-exit after 7 s so the helper script can finally proceed.
+            // The user still sees the "Force Quit Now" button in the meantime.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 7.0) { [weak self] in
+                self?.log("Auto-fallback: 7s sonra hala buradayız → exit(0)")
+                Darwin.exit(0)
+            }
         } catch {
+            log("Hata: \(error.localizedDescription)")
             state = .error(error.localizedDescription)
         }
     }
@@ -210,12 +258,14 @@ final class UpdateChecker: ObservableObject {
 
     private func installAndRelaunch(stagedApp: URL) throws {
         let currentApp = Bundle.main.bundleURL
+        log("Mevcut bundle: \(currentApp.path)")
         guard currentApp.path.hasSuffix(".app") else {
             throw UpdateError("Heart bir .app bundle'ı içinden çalışmıyor (\(currentApp.path)). Güncelleyici sadece kurulu uygulamadan çalışır.")
         }
         let pid = ProcessInfo.processInfo.processIdentifier
         let scriptURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("heart-update-\(pid).sh")
+        log("Helper script: \(scriptURL.path)")
 
         let appQ = shellQuote(currentApp.path)
         let stagedQ = shellQuote(stagedApp.path)
@@ -240,12 +290,14 @@ final class UpdateChecker: ObservableObject {
         rm -f "$0"
         """
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        log("Script yazıldı (\(script.count) bytes)")
 
         let chmod = Process()
         chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
         chmod.arguments = ["+x", scriptURL.path]
         try chmod.run()
         chmod.waitUntilExit()
+        log("chmod +x exit: \(chmod.terminationStatus)")
 
         // Detach via nohup so the helper outlives this process.
         let launcher = Process()
@@ -253,6 +305,7 @@ final class UpdateChecker: ObservableObject {
         launcher.arguments = ["-c", "nohup \(shellQuote(scriptURL.path)) </dev/null >/dev/null 2>&1 &"]
         try launcher.run()
         launcher.waitUntilExit()
+        log("nohup launcher exit: \(launcher.terminationStatus)")
     }
 
     private func shellQuote(_ s: String) -> String {

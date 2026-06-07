@@ -108,14 +108,21 @@ struct UpdateView: View {
                 Text("%\(Int(progress * 100))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                installLog
             }
 
         case .installing:
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text("Yeni sürüm kuruluyor ve uygulama yeniden başlatılıyor…")
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("Yeni sürüm kuruluyor ve uygulama yeniden başlatılıyor…")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                installLog
+                Text("Donduysa aşağıdaki \"Force Quit & Install\" butonuna bas — Heart hemen kapanır, helper script kalan işlemi yapar.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                Spacer()
             }
 
         case .error(let message):
@@ -125,6 +132,36 @@ struct UpdateView: View {
                 Text("İnternet bağlantını kontrol et veya github.com/ocracy/heart adresinden manuel indir.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Scrollable timeline of every step the updater took. Empty until the
+    /// download starts; auto-scrolls to bottom so the latest line is visible
+    /// without the user having to drag the scroll knob.
+    @ViewBuilder
+    private var installLog: some View {
+        if !checker.installLog.isEmpty {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(checker.installLog.enumerated()), id: \.offset) { idx, line in
+                            Text(line)
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                                .id(idx)
+                        }
+                    }
+                    .padding(8)
+                }
+                .frame(maxHeight: 160)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
+                .onChange(of: checker.installLog.count) { _ in
+                    if let last = checker.installLog.indices.last {
+                        proxy.scrollTo(last, anchor: .bottom)
+                    }
+                }
             }
         }
     }
@@ -177,9 +214,19 @@ struct UpdateView: View {
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
 
-            case .downloading, .installing:
+            case .downloading:
                 Button("Kapat", action: onClose)
                     .disabled(true)
+
+            case .installing:
+                Button {
+                    checker.forceQuitNow()
+                } label: {
+                    Label("Force Quit & Install", systemImage: "bolt.fill")
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
 
             case .error:
                 Button("Kapat", action: onClose)
