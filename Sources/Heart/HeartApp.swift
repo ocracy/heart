@@ -8,6 +8,16 @@ final class ContentRouter: ObservableObject {
     @Published var pendingImportURLs: [URL] = []
 }
 
+/// Posted with `object: Int` (1..9) when the user hits ⌘+digit. ContentView
+/// listens for these and routes them either to a project switch (when the
+/// selected task isn't a Claude shortcut) or to a Claude session switch
+/// (when the active detail is a Claude row). Going through Notification
+/// instead of binding lets the menu items live in `HeartApp.commands` while
+/// the handler stays inside the SwiftUI view tree.
+extension Notification.Name {
+    static let heartSelectSlot = Notification.Name("Heart.SelectSlot")
+}
+
 @main
 struct HeartApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -39,6 +49,20 @@ struct HeartApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            // ⌘1..⌘9 — context-sensitive slot switcher. The actual destination
+            // (project tab vs. Claude session) is decided in ContentView by
+            // peeking at the current selection. Items are exposed in the menu
+            // bar (Window → Go to slot N) so the shortcuts are discoverable.
+            CommandMenu("Go") {
+                ForEach(1..<10) { n in
+                    Button("Slot \(n)") {
+                        NotificationCenter.default.post(name: .heartSelectSlot,
+                                                        object: n)
+                    }
+                    .keyboardShortcut(KeyEquivalent(Character("\(n)")),
+                                      modifiers: .command)
+                }
+            }
         }
     }
 }

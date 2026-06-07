@@ -63,9 +63,11 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         view.nativeBackgroundColor = NSColor(calibratedWhite: 0.10, alpha: 1.0)
         view.nativeForegroundColor = NSColor(calibratedWhite: 0.92, alpha: 1.0)
         // SwiftTerm default scrollback is 500 lines — way too small for dev servers that
-        // log hundreds of lines per request. Bump to 50k so the user can scroll back
-        // through long sessions (build logs, test runs, claude conversations).
-        view.getTerminal().changeScrollback(50_000)
+        // log hundreds of lines per request. 10k is a compromise: deep enough to scroll
+        // through long sessions (build logs, test runs, claude conversations) without
+        // making SwiftTerm's per-paint allocation grow huge. The earlier 50k setting
+        // was suspected of contributing to render lag in Claude Code's dynamic UI.
+        view.getTerminal().changeScrollback(10_000)
         terminalViews[taskId] = view
         return view
     }
@@ -198,6 +200,16 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         if env["LANG"] == nil {
             env["LANG"] = "en_US.UTF-8"
         }
+        // Hint to terminal-aware CLIs that Heart isn't iTerm / VS Code so they
+        // don't enable features SwiftTerm can't handle gracefully (most
+        // notably Claude Code's alt-screen "flicker-free" renderer, which
+        // emits modern escape sequences SwiftTerm parses poorly and produces
+        // the "every character on its own line" garbling — bug we couldn't
+        // root-cause via the earlier winsize fix). Explicit `=0` is a stronger
+        // signal than just absence, since Claude Code's default has flipped
+        // before across versions.
+        env["TERM_PROGRAM"] = "Heart"
+        env["CLAUDE_CODE_NO_FLICKER"] = "0"
         return env.map { "\($0.key)=\($0.value)" }
     }
 

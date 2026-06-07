@@ -250,6 +250,10 @@ struct ContentView: View {
             let count = store.tasksUnder(project: name).count
             Text("Delete '\(name)' and \(count) task\(count == 1 ? "" : "s")?")
         }
+        .onReceive(NotificationCenter.default.publisher(for: .heartSelectSlot)) { note in
+            guard let slot = note.object as? Int else { return }
+            handleSlotShortcut(slot)
+        }
         .onAppear {
             NSLog("[Heart] ContentView onAppear — %d task(s), %d project(s)",
                   store.tasks.count, store.orderedProjects.count)
@@ -463,6 +467,34 @@ struct ContentView: View {
             result[project] = (running, tasks.count)
         }
         return result
+    }
+
+    /// ⌘1..⌘9 dispatch. If the active detail is a Claude-shortcut task, route
+    /// the slot number to that task's Nth open session (1-indexed) so it
+    /// behaves like the iTerm tab shortcuts users already have muscle memory
+    /// for. Otherwise switch to the Nth project tab. No-op when the requested
+    /// slot is out of range so a stray ⌘8 in a single-session project doesn't
+    /// jump somewhere surprising.
+    private func handleSlotShortcut(_ slot: Int) {
+        let idx = slot - 1
+        guard idx >= 0 else { return }
+
+        if let taskId = selectedTaskId,
+           let task = store.tasks.first(where: { $0.id == taskId }),
+           task.isClaudeShortcut
+        {
+            let sessions = processManager.sessions(for: task.id)
+            guard idx < sessions.count else { return }
+            processManager.setActiveSession(taskId: task.id, sessionId: sessions[idx].id)
+            return
+        }
+
+        let projects = store.orderedProjects
+        guard idx < projects.count else { return }
+        let target = projects[idx]
+        if selectedProject != target {
+            switchToProject(target)
+        }
     }
 
     private func switchToProject(_ project: String) {

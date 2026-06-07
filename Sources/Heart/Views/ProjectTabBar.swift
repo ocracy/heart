@@ -35,6 +35,14 @@ struct ProjectTabBar: View {
     let onDelete: (String) -> Void
 
     @State private var dropTargeted: Bool = false
+    /// Tab the user just clicked — used to flag the pill as "pending" so the
+    /// UI feels responsive while SwiftUI rebuilds the (heavy) sidebar +
+    /// detail tree for the new selection. Cleared as soon as `selection`
+    /// actually moves to it.
+    @State private var pendingSelection: String?
+    /// Drives a thin progress shimmer at the bottom of the bar while the
+    /// switch is in flight. Same lifetime as `pendingSelection`.
+    @State private var isSwitching: Bool = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -72,14 +80,34 @@ struct ProjectTabBar: View {
             }
         )
         .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.secondary.opacity(0.18))
-                .frame(height: 0.5)
+            ZStack(alignment: .leading) {
+                Rectangle()
+                    .fill(Color.secondary.opacity(0.18))
+                    .frame(height: 0.5)
+                if isSwitching {
+                    LinearGradient(
+                        colors: [Color.accentColor.opacity(0),
+                                 Color.accentColor,
+                                 Color.accentColor.opacity(0)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(height: 2)
+                    .transition(.opacity)
+                }
+            }
         }
         .dropDestination(for: URL.self) { urls, _ in
             onDropNewProject(urls)
             return true
         } isTargeted: { dropTargeted = $0 }
+        .onChange(of: selection) { _ in
+            // Selection landed — drop the pending flag so the pill reverts to
+            // its real selected/idle stylingt. The brief "isSwitching" pulse
+            // lingers ~120ms past the change so the bar animation finishes.
+            pendingSelection = nil
+            withAnimation(.easeOut(duration: 0.18)) { isSwitching = false }
+        }
     }
 
     // MARK: - Pill
@@ -87,18 +115,30 @@ struct ProjectTabBar: View {
     @ViewBuilder
     private func pill(for project: String) -> some View {
         let isActive = (selection == project)
+        let isPending = (pendingSelection == project && !isActive)
+        // Pending styling sits halfway between idle and active so the user
+        // can see the click registered even before SwiftUI finishes the
+        // sidebar rebuild — without faking a "you're already there" state.
+        let displayActive = isActive || isPending
         let counts = runningCounts[project] ?? (0, 0)
         let hasSource = sources[project] != nil
 
         HStack(spacing: 6) {
-            Image(systemName: hasSource ? "doc.text.fill" : "folder.fill")
-                .font(.system(size: 10))
-                .foregroundStyle(isActive ? Color.accentColor : .secondary)
+            if isPending {
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.55)
+                    .frame(width: 10, height: 10)
+            } else {
+                Image(systemName: hasSource ? "doc.text.fill" : "folder.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(displayActive ? Color.accentColor : .secondary)
+            }
             Text(project)
-                .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                .font(.system(size: 12, weight: displayActive ? .semibold : .regular))
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                .foregroundStyle(displayActive ? Color.primary : Color.secondary)
             badge(running: counts.0, total: counts.1)
         }
         .frame(maxWidth: 180)
@@ -108,18 +148,25 @@ struct ProjectTabBar: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(isActive
                       ? Color.accentColor.opacity(0.18)
-                      : Color.secondary.opacity(0.06))
+                      : (isPending
+                         ? Color.accentColor.opacity(0.10)
+                         : Color.secondary.opacity(0.06)))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(isActive
-                        ? Color.accentColor.opacity(0.55)
+                .stroke(displayActive
+                        ? Color.accentColor.opacity(isPending ? 0.35 : 0.55)
                         : Color.secondary.opacity(0.18),
                         lineWidth: 0.5)
         )
         .contentShape(Rectangle())
         .help(project)
-        .onTapGesture { onSelect(project) }
+        .onTapGesture {
+            guard selection != project else { return }
+            pendingSelection = project
+            withAnimation(.easeIn(duration: 0.08)) { isSwitching = true }
+            onSelect(project)
+        }
         .contextMenu { contextMenu(for: project) }
         .draggable(project) {
             HStack(spacing: 6) {
