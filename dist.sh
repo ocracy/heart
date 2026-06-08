@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 # (UpdateChecker.swift) compares this against the latest GitHub release
 # tag, so bumping this string is the only thing required when shipping
 # a new build — make sure it matches the `vX.Y.Z` git tag you publish.
-VERSION="1.8.4"
+VERSION="1.8.5"
 
 APP_NAME="Heart"
 APP="${APP_NAME}.app"

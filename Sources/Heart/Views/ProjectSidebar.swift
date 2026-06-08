@@ -70,6 +70,13 @@ struct ProjectSidebar: View {
     let onReloadSource: () -> Void
 
     @State private var isDropTargeted = false
+    /// Folder path (sidebar header) currently being hovered with a dragged
+    /// task. Used to outline the target so the drop affordance is visible —
+    /// without it the user can't tell where their drag will land.
+    @State private var dropHoverFolder: String?
+    /// True while a task drag is hovering the sidebar's bottom "out of folder"
+    /// zone. Drives that zone's accent outline.
+    @State private var dropHoverRoot: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,9 +94,25 @@ struct ProjectSidebar: View {
             }
             .listStyle(.sidebar)
 
+            // Task-drag "leave folder" target — sits on top of the
+            // JSON-import DropZone so dragging a row from inside a folder
+            // out onto here moves it back to the project root. URL drops
+            // (file imports) still pass through to the outer modifier on
+            // the sidebar VStack via the `.dropDestination(for: URL.self)`
+            // attached there; String drops (task ids) land here.
             DropZoneView(isTargeted: isDropTargeted)
                 .padding(8)
+                .overlay {
+                    if dropHoverRoot {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.accentColor, lineWidth: 1.5)
+                            .padding(8)
+                    }
+                }
                 .onTapGesture { onPickImport() }
+                .dropDestination(for: String.self) { ids, _ in
+                    handleTaskDrop(ids, into: project)
+                } isTargeted: { dropHoverRoot = $0 }
         }
         .dropDestination(for: URL.self) { urls, _ in
             onDropReplace(urls)
@@ -339,6 +362,21 @@ struct ProjectSidebar: View {
         }
         .padding(.vertical, 5)
         .background(Color.secondary.opacity(0.03))
+        // Empty-area right-click on the quick bar. The chip buttons keep
+        // their own contextMenu (Run/Stop/Move to/Edit/Duplicate/Delete);
+        // SwiftUI picks the deepest hit-tested view, so right-clicking a
+        // chip still shows the chip's menu — this only triggers between
+        // chips or in the bar's empty trailing space.
+        .contextMenu {
+            Button { onAddQuickAction() } label: {
+                Label("New quick action…", systemImage: "bolt.fill")
+            }
+            Button {
+                onAddFolder(project)
+            } label: {
+                Label("New folder…", systemImage: "folder.badge.plus")
+            }
+        }
     }
 
     /// Split the project's quick chips into "lives at the project root" and
@@ -428,6 +466,21 @@ struct ProjectSidebar: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help(folder)
+        // Drag a chip onto this folder chip = move that chip into this
+        // folder. `folder` here is project-local ("Backend/Workers"); the
+        // store wants an absolute path so we re-prefix with the project name.
+        .dropDestination(for: String.self) { ids, _ in
+            handleTaskDrop(ids, into: "\(project)/\(folder)")
+        } isTargeted: { hovering in
+            let key = "\(project)/\(folder)"
+            dropHoverFolder = hovering ? key : (dropHoverFolder == key ? nil : dropHoverFolder)
+        }
+        .overlay {
+            if dropHoverFolder == "\(project)/\(folder)" {
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.accentColor, lineWidth: 1.5)
+            }
+        }
     }
 
     /// Last path component of a "Frontend/Workers"-shaped folder string —
@@ -486,6 +539,21 @@ struct ProjectSidebar: View {
         }
         .buttonStyle(.plain)
         .help(task.command)
+        .draggable(task.id) {
+            HStack(spacing: 4) {
+                if let icon = task.icon, !icon.isEmpty {
+                    Image(systemName: icon)
+                }
+                Text(task.name.isEmpty ? task.command : task.name)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.accentColor.opacity(0.25))
+            )
+        }
         .contextMenu {
             Button {
                 onQuickTap(task)
@@ -494,6 +562,7 @@ struct ProjectSidebar: View {
             }
             Divider()
             Button { onEdit(task) } label: { Label("Edit…", systemImage: "pencil") }
+            moveToMenu(for: task)
             Button { onDuplicate(task) } label: {
                 Label("Duplicate", systemImage: "plus.square.on.square")
             }
@@ -562,6 +631,39 @@ struct ProjectSidebar: View {
             else if task.isGithub { githubRowMenu(for: task) }
             else { rowMenu(for: task) }
         }
+        // Drag source: ship the task id as a plain string. Folder headers
+        // and the sidebar's bottom "out of folder" zone are the destinations.
+        // Quick action chips share the same id type, so a quick chip can be
+        // dragged onto a folder chip too.
+        .draggable(task.id) {
+            HStack(spacing: 4) {
+                if let icon = task.icon, !icon.isEmpty {
+                    Image(systemName: icon)
+                }
+                Text(task.name.isEmpty ? task.command : task.name)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.accentColor.opacity(0.25))
+            )
+        }
+    }
+
+    /// Common drop handler — shared by folder headers, the sidebar root
+    /// drop zone, and the quick-bar folder chips. Looks the dragged id up
+    /// in the store and calls `onMoveTask` when it actually changes folder;
+    /// silently rejects no-ops (drag onto current folder, unknown id).
+    private func handleTaskDrop(_ ids: [String], into folderPath: String) -> Bool {
+        guard let id = ids.first,
+              let task = store.tasks.first(where: { $0.id == id }) else {
+            return false
+        }
+        if (task.folder ?? "") == folderPath { return false }
+        onMoveTask(task, folderPath)
+        return true
     }
 
     /// Pair of up/down arrows used to reorder a row in edit mode. Cleaner than
@@ -824,7 +926,7 @@ struct ProjectSidebar: View {
                     onMoveTask(task, path)
                 } label: {
                     if path == project {
-                        Label("\(project) (root)", systemImage: "house")
+                        Label("At project root", systemImage: "arrow.up.to.line")
                     } else {
                         let prefix = project + "/"
                         let display = path.hasPrefix(prefix)
@@ -847,12 +949,14 @@ struct ProjectSidebar: View {
     }
 
     /// Project root + every subfolder path under it. Used to populate the
-    /// per-row "Move to…" submenu.
+    /// per-row "Move to…" submenu. The walk visits root once (path == project)
+    /// and every descendant — earlier code hardcoded `[project]` *and then*
+    /// walked, producing two identical "root" entries in the menu.
     private var availableFolderPaths: [String] {
-        var paths: [String] = [project]
+        var paths: [String] = []
         let root = store.buildTree(forProject: project)
         func walk(_ node: FolderNode) {
-            if !node.path.isEmpty { paths.append(node.path) }
+            paths.append(node.path)
             for sub in node.subfolders { walk(sub) }
         }
         walk(root)
@@ -958,6 +1062,17 @@ struct ProjectSidebar: View {
         .padding(.leading, CGFloat(depth * 14))
         .padding(.trailing, 6)
         .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(dropHoverFolder == node.path ? Color.accentColor : .clear,
+                        lineWidth: 1.5)
+                .padding(.horizontal, 4)
+        )
+        .dropDestination(for: String.self) { ids, _ in
+            handleTaskDrop(ids, into: node.path)
+        } isTargeted: { hovering in
+            dropHoverFolder = hovering ? node.path : (dropHoverFolder == node.path ? nil : dropHoverFolder)
+        }
         .contextMenu {
             Button { onAddFolder(node.path) } label: {
                 Label("Add subfolder…", systemImage: "folder.badge.plus")

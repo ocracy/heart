@@ -1629,6 +1629,15 @@ struct EditTaskSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
+                    // Type lives at the top now. The form below adapts to the
+                    // chosen kind (Browser hides Command, GitHub shows only a
+                    // repo path, …) so picking late used to wipe the user's
+                    // typed Command field — putting Type first removes that
+                    // surprise.
+                    section(title: "Type", icon: "switch.2") {
+                        typeCardGrid
+                    }
+
                     section(title: "Essentials", icon: "doc.text") {
                         HStack(alignment: .top, spacing: 14) {
                             VStack(spacing: 6) {
@@ -1693,24 +1702,6 @@ struct EditTaskSheet: View {
                                                 text: $url,
                                                 monospaced: true)
                             }
-                        }
-                    }
-
-                    section(title: "Type", icon: "switch.2") {
-                        Picker("Task type", selection: $taskKind) {
-                            ForEach(TaskKind.allCases) { kind in
-                                Label(kind.label, systemImage: kind.iconName).tag(kind)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-
-                        Text(taskKind.detail)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        if taskKind == .service {
                             Toggle(isOn: $autoStart) {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Auto-start on launch")
@@ -1732,8 +1723,85 @@ struct EditTaskSheet: View {
 
             footer
         }
-        .frame(width: 600, height: 700)
+        .frame(width: 600, height: 720)
         .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    /// 2×3 button grid for selecting the task kind. Each card surfaces the
+    /// icon, label, and the first sentence of the kind's detail string so the
+    /// user can pick at a glance without having to commit and then read.
+    /// Reuses `TaskKind.iconName` and `TaskKind.detail`.
+    @ViewBuilder
+    private var typeCardGrid: some View {
+        let columns = [
+            GridItem(.flexible(), spacing: 10),
+            GridItem(.flexible(), spacing: 10),
+            GridItem(.flexible(), spacing: 10)
+        ]
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+            ForEach(TaskKind.allCases) { kind in
+                typeCard(kind: kind)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func typeCard(kind: TaskKind) -> some View {
+        let isSelected = (taskKind == kind)
+        Button {
+            taskKind = kind
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: kind.iconName)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    Text(kind.label)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(isSelected ? Color.primary : .secondary)
+                    Spacer(minLength: 0)
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+                Text(Self.firstSentence(of: kind.detail))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, minHeight: 84, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isSelected
+                          ? Color.accentColor.opacity(0.14)
+                          : Color.secondary.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(isSelected
+                                  ? Color.accentColor.opacity(0.65)
+                                  : Color.secondary.opacity(0.18),
+                                  lineWidth: isSelected ? 1.2 : 0.5)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(kind.detail)
+    }
+
+    /// Trim a multi-sentence detail string down to the first sentence so the
+    /// type card stays compact. Falls back to the whole string when there's
+    /// no period to split on.
+    private static func firstSentence(of s: String) -> String {
+        if let dot = s.firstIndex(of: ".") {
+            return String(s[...dot])
+        }
+        return s
     }
 
     // MARK: - sections
