@@ -274,6 +274,16 @@ struct ContentView: View {
                 if let project = selectedProject {
                     selectedTaskByProject[project] = newId
                 }
+                // Auto-recovery for the Claude render glitch: after the
+                // detail pane has had a beat to relayout, force a full
+                // repaint on the freshly-shown task. This is the same
+                // operation as the toolbar Repaint button — the user
+                // observed that switching tabs "sometimes fixed it",
+                // because attach() already triggers a refresh; this makes
+                // the recovery deterministic instead of accidental.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [newId] in
+                    processManager.repaint(newId)
+                }
             } else {
                 DispatchQueue.main.async {
                     selectedTaskId = lastValidTaskId
@@ -1232,6 +1242,15 @@ struct ContentView: View {
                     .help(Text(verbatim: "Kills any process listening on :\(port)"))
                 }
                 if active == .terminal {
+                    Button {
+                        processManager.repaint(id)
+                    } label: {
+                        Label("Repaint", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Force a full terminal redraw (use when characters look smeared / stacked vertically — Claude render glitch fix)")
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+
                     Button {
                         processManager.clearOutput(id)
                     } label: {

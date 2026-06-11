@@ -30,6 +30,13 @@ struct OutputView: NSViewRepresentable {
 /// calls don't churn the view tree.
 final class TerminalContainerView: NSView {
     private weak var currentTerminal: LocalProcessTerminalView?
+    /// Debounce timer for live window/sidebar drags. Without it, SwiftTerm
+    /// runs its `processSizeChange` (which mutates terminal state + calls
+    /// TIOCSWINSZ on the child PTY) on every single mouse-move during a
+    /// drag — that's where the "resize sometimes makes it worse" symptom
+    /// in `claude` was coming from. Coalescing to the trailing edge gives
+    /// SwiftTerm + the child process a single, clean resize event.
+    private var resizeDebounce: DispatchWorkItem?
 
     func attach(_ tv: LocalProcessTerminalView) {
         if currentTerminal === tv { return }
@@ -45,38 +52,55 @@ final class TerminalContainerView: NSView {
 
         // Force a redraw once the view is on-screen — SwiftTerm sometimes
         // shows a stale / empty canvas right after a re-attach even though
-        // the buffer is still populated. Doing this async lets the view
-        // settle into its window first. We also re-trigger `setFrameSize` to
-        // guarantee SwiftTerm's processSizeChange runs (which calls
-        // `terminal.resize(cols:rows:)` AND TIOCSWINSZ on the child PTY).
-        // Without this, attach swaps between containers can leave the child
-        // process thinking the terminal is still its old (sometimes 0×0)
-        // size — the symptom is Claude Code etc. drawing each character on
-        // its own line, as if cols=1.
+        // the buffer is still populated. We do TWO passes:
+        //  • t=0  : settle size + focus + initial refresh
+        //  • t=350ms : second refresh after Cocoa's layout cycle has run.
+        // The double-tap matters because users reported that flipping
+        // between tasks "sometimes" fixed the Claude render glitch — the
+        // first refresh races SwiftUI's full layout pass, so a second one
+        // after settle is what makes the recovery deterministic.
         DispatchQueue.main.async { [weak tv, weak self] in
             guard let view = tv, let self = self, let window = view.window else { return }
             let target = self.bounds.size
             if target.width > 0 && target.height > 0 {
-                // Setting to .zero then back forces processSizeChange to fire
-                // even when the size hasn't numerically changed since attach.
                 view.setFrameSize(target)
             }
             window.makeFirstResponder(view)
             view.needsDisplay = true
-            view.getTerminal().refresh(startRow: 0, endRow: view.getTerminal().rows)
+            let term = view.getTerminal()
+            term.refresh(startRow: 0, endRow: term.rows)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak tv] in
+            guard let view = tv, view.window != nil else { return }
+            let term = view.getTerminal()
+            term.refresh(startRow: 0, endRow: term.rows)
+            view.needsDisplay = true
         }
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        // Container resized (window drag, split-view drag, sidebar toggle…).
-        // Forward the new size to SwiftTerm so it re-runs processSizeChange
-        // even if autoresizingMask alone fails to trigger it (which it can on
-        // first show, before the view tree is in a window). This is the path
-        // that keeps `claude` from getting stuck with stale cols/rows after
-        // the user changes layout.
-        if let tv = currentTerminal, newSize.width > 0, newSize.height > 0 {
-            tv.setFrameSize(newSize)
+        guard let tv = currentTerminal, newSize.width > 0, newSize.height > 0 else { return }
+
+        // First pass: keep the NSView in sync with the container so the
+        // canvas keeps tracking the drag in real time (otherwise it'd
+        // appear frozen until the user lets go of the mouse).
+        tv.setFrameSize(newSize)
+
+        // Second pass: debounce a clean repaint to the trailing edge of
+        // the drag. SwiftTerm's resize pipeline is heavy (it recomputes
+        // cols/rows, calls TIOCSWINSZ, dispatches a sizeChanged event);
+        // running it on every drag frame is what caused the "smeared
+        // characters" mid-drag. 80ms after the last resize tick, the
+        // user has stopped — that's when we run a single refresh.
+        resizeDebounce?.cancel()
+        let work = DispatchWorkItem { [weak tv] in
+            guard let view = tv, view.window != nil else { return }
+            let term = view.getTerminal()
+            term.refresh(startRow: 0, endRow: term.rows)
+            view.needsDisplay = true
         }
+        resizeDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
     }
 }

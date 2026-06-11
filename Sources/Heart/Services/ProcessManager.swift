@@ -301,6 +301,34 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         view.feed(text: "\u{1B}c")
     }
 
+    /// Force SwiftTerm to throw away whatever it's caching and redraw the
+    /// whole buffer. The user's escape hatch for the (still-not-root-caused)
+    /// "every character on its own line" rendering glitch in `claude` and
+    /// other dynamic-UI CLIs — and what the auto-recovery wired into
+    /// detail-bar task switches calls on their behalf.
+    ///
+    /// Why each step is here:
+    ///   - `terminal.resize(cols:rows:)` re-runs SwiftTerm's layout pass and
+    ///     calls TIOCSWINSZ on the child PTY, in case the child cached a
+    ///     wrong size (a long-standing suspect for the glitch).
+    ///   - `softReset()` clears pending escape state, cursor save/restore,
+    ///     scroll regions, charset mode — *without* touching the scrollback
+    ///     buffer the user is reading. Critical: this is NOT `reset()`,
+    ///     which would wipe the buffer.
+    ///   - `refresh(startRow:endRow:)` + `needsDisplay` mark every cell
+    ///     dirty so Cocoa repaints the whole canvas, evicting any stale
+    ///     glyphs left by escape sequences SwiftTerm parsed badly.
+    func repaint(_ taskId: String) {
+        guard let view = terminalViews[taskId] else { return }
+        let terminal = view.getTerminal()
+        let cols = max(1, terminal.cols)
+        let rows = max(1, terminal.rows)
+        view.resize(cols: cols, rows: rows)
+        terminal.softReset()
+        terminal.refresh(startRow: 0, endRow: rows)
+        view.needsDisplay = true
+    }
+
     /// Scan tasks with a `port` and flag them as `.externalRunning` if the port
     /// is already bound by a process Heart didn't spawn — e.g. `redis-server`
     /// started outside Heart. Existing statuses (Heart-owned running tasks,
