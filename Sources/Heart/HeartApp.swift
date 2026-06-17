@@ -16,6 +16,15 @@ final class ContentRouter: ObservableObject {
 /// the handler stays inside the SwiftUI view tree.
 extension Notification.Name {
     static let heartSelectSlot = Notification.Name("Heart.SelectSlot")
+    /// ⌘T — open a new terminal/session in the current detail context.
+    /// (Claude shortcut → addSession; other tasks → spawn a fresh terminal
+    /// task at the current task's cwd.)
+    static let heartNewTerminal = Notification.Name("Heart.NewTerminal")
+    /// ⌘W — close the active terminal/session. Scoped to Claude sessions
+    /// and ephemeral terminal-shortcut tasks; refuses to act on
+    /// user-configured tasks so the shortcut can't accidentally nuke
+    /// somebody's heart.json entry.
+    static let heartCloseTerminal = Notification.Name("Heart.CloseTerminal")
 }
 
 @main
@@ -62,6 +71,19 @@ struct HeartApp: App {
                     .keyboardShortcut(KeyEquivalent(Character("\(n)")),
                                       modifiers: .command)
                 }
+            }
+            // ⌘T / ⌘W — terminal lifecycle, also handled by ContentView.
+            // Lives in a Terminal menu so the shortcuts are discoverable
+            // and so other Cocoa-default ⌘T (font panel) doesn't shadow ours.
+            CommandMenu("Terminal") {
+                Button("New Terminal / Session") {
+                    NotificationCenter.default.post(name: .heartNewTerminal, object: nil)
+                }
+                .keyboardShortcut("t", modifiers: .command)
+                Button("Close Active Terminal / Session") {
+                    NotificationCenter.default.post(name: .heartCloseTerminal, object: nil)
+                }
+                .keyboardShortcut("w", modifiers: .command)
             }
         }
     }

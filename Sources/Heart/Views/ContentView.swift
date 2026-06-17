@@ -254,6 +254,12 @@ struct ContentView: View {
             guard let slot = note.object as? Int else { return }
             handleSlotShortcut(slot)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .heartNewTerminal)) { _ in
+            handleNewTerminalShortcut()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .heartCloseTerminal)) { _ in
+            handleCloseTerminalShortcut()
+        }
         .onAppear {
             NSLog("[Heart] ContentView onAppear — %d task(s), %d project(s)",
                   store.tasks.count, store.orderedProjects.count)
@@ -477,6 +483,75 @@ struct ContentView: View {
             result[project] = (running, tasks.count)
         }
         return result
+    }
+
+    /// ⌘T — context-aware "open a new terminal":
+    ///   • Claude shortcut active → spawn a new Claude session on that task
+    ///     (same as the in-pane "+" pill in ClaudeDetailView).
+    ///   • Anything else → spawn a fresh terminal task. Uses the user's
+    ///     first saved terminal-shortcut cwd when one exists; otherwise
+    ///     falls back to the current task's cwd. Lands in the active
+    ///     project so it shows up next to its siblings.
+    private func handleNewTerminalShortcut() {
+        guard let taskId = selectedTaskId,
+              let task = store.tasks.first(where: { $0.id == taskId }) else {
+            // No task selected at all — pick a sane cwd and spawn anyway,
+            // so ⌘T isn't dead in an empty project.
+            if let first = store.terminalShortcuts.first {
+                spawnTerminal(in: selectedProject, shortcut: first)
+            }
+            return
+        }
+        if task.isClaudeShortcut {
+            processManager.addSession(for: task)
+            return
+        }
+        let shortcut: TerminalShortcut
+        if let first = store.terminalShortcuts.first {
+            shortcut = first
+        } else {
+            // Synthesize a one-shot shortcut from the current task's cwd so
+            // ⌘T always does *something* even before the user has saved any
+            // paths in the "+ Terminal" menu.
+            let cwd = task.cwd.isEmpty ? NSHomeDirectory() : task.cwd
+            let name = (cwd as NSString).lastPathComponent
+            shortcut = TerminalShortcut(name: name, path: cwd)
+        }
+        spawnTerminal(in: projectOf(task: task), shortcut: shortcut)
+    }
+
+    /// ⌘W — close the currently visible terminal:
+    ///   • Claude shortcut active → close that task's active session
+    ///     (kills the PTY + drops the session pill).
+    ///   • Ephemeral terminal task (id starts with `terminal-`, kind=shortcut,
+    ///     icon=terminal — the ones spawned by the "+ Terminal" menu or ⌘T) →
+    ///     stop + delete the task.
+    /// Refuses to act on user-configured services / quick actions / browsers
+    /// etc. so the shortcut can't accidentally wipe a saved heart.json row.
+    private func handleCloseTerminalShortcut() {
+        guard let taskId = selectedTaskId,
+              let task = store.tasks.first(where: { $0.id == taskId }) else {
+            return
+        }
+        if task.isClaudeShortcut {
+            if let active = processManager.activeSession(for: task.id) {
+                processManager.removeSession(taskId: task.id, sessionId: active)
+            }
+            return
+        }
+        if isEphemeralTerminalTask(task) {
+            deleteTask(task)
+        }
+    }
+
+    /// True for tasks the user can safely lose to ⌘W — the ones we
+    /// synthesized for them via the "+ Terminal" menu / ⌘T. Heuristic:
+    /// id prefix + shortcut kind + terminal icon, which only line up for
+    /// the path we spawn from `spawnTerminal(in:shortcut:)`.
+    private func isEphemeralTerminalTask(_ task: DevTask) -> Bool {
+        task.id.hasPrefix("terminal-")
+            && task.kind == "shortcut"
+            && task.icon == "terminal"
     }
 
     /// ⌘1..⌘9 dispatch. If the active detail is a Claude-shortcut task, route
