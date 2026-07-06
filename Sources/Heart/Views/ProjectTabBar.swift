@@ -9,6 +9,9 @@ struct ProjectTabBar: View {
     @Binding var selection: String?
     /// (running, total) by project name.
     let runningCounts: [String: (Int, Int)]
+    /// Number of Claude sessions waiting on the user, by project name. >0 lights
+    /// up a red dot on the pill so the user can spot which project needs them.
+    let waitingCounts: [String: Int]
     /// `nil` source = empty/manual project; otherwise the path of the linked JSON.
     let sources: [String: String]
 
@@ -140,6 +143,16 @@ struct ProjectTabBar: View {
                 .truncationMode(.tail)
                 .foregroundStyle(displayActive ? Color.primary : Color.secondary)
             badge(running: counts.0, total: counts.1)
+            let waiting = waitingCounts[project] ?? 0
+            if waiting > 0 {
+                Text(verbatim: "\(waiting)")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.red))
+                    .help("\(waiting) Claude session aksiyon bekliyor")
+            }
         }
         .frame(maxWidth: 180)
         .padding(.horizontal, 10)

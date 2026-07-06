@@ -6,10 +6,22 @@ import SwiftUI
 struct ClaudeShortcutRow: View {
     let task: DevTask
     let isSelected: Bool
+    @ObservedObject var processManager: ProcessManager
     let onTap: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
+            // Attention dot: red = a session here is waiting on you, green = a
+            // session is actively working, hidden = no Claude session running.
+            ZStack {
+                if let attn = processManager.attentionFor(task.id) {
+                    Circle()
+                        .fill(attn == .waiting ? Color.red : Color.green)
+                        .frame(width: 8, height: 8)
+                }
+            }
+            .frame(width: 8)
+
             Image(systemName: task.icon ?? "sparkles")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.purple)

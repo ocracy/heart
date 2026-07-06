@@ -76,6 +76,7 @@ struct ContentView: View {
                     projects: store.orderedProjects,
                     selection: $selectedProject,
                     runningCounts: runningCountsByProject,
+                    waitingCounts: waitingCountsByProject,
                     sources: store.bundleSources,
                     onSelect: { switchToProject($0) },
                     onPickFile: { pickAndImport(into: nil) },
@@ -274,6 +275,9 @@ struct ContentView: View {
             processManager.scanForExternalServices(store.tasks)
         }
         .onChange(of: selectedTaskId) { newId in
+            // Tell ProcessManager which terminal the user is looking at, so it
+            // can stay silent when *this* session starts waiting.
+            processManager.focusedTaskId = newId
             guard let newId else { return }
             if store.tasks.contains(where: { $0.id == newId }) {
                 lastValidTaskId = newId
@@ -481,6 +485,17 @@ struct ContentView: View {
             let tasks = store.tasksUnder(project: project)
             let running = tasks.filter { processManager.status($0.id).isRunning }.count
             result[project] = (running, tasks.count)
+        }
+        return result
+    }
+
+    /// Count of Claude sessions waiting on the user per project — fed to
+    /// ProjectTabBar for the red "needs you" dot.
+    private var waitingCountsByProject: [String: Int] {
+        var result: [String: Int] = [:]
+        for project in store.orderedProjects {
+            let count = processManager.waitingCount(among: store.tasksUnder(project: project))
+            if count > 0 { result[project] = count }
         }
         return result
     }

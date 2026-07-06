@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 # Keep in sync with dist.sh — single source of truth for the bundled
 # version that the in-app updater (UpdateChecker.swift) reads via
 # CFBundleShortVersionString.
-VERSION="1.8.0"
+VERSION="1.9.11"
 
 APP_NAME="Heart"
 APP="${APP_NAME}.app"

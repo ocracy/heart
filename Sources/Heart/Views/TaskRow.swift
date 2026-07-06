@@ -8,10 +8,21 @@ struct TaskRow: View {
 
     private var status: TaskStatus { processManager.status(task.id) }
 
+    /// When a Claude session is running in this terminal the dot reflects its
+    /// attention state — green = working, red = waiting for the user — overriding
+    /// the normal process-status color. No Claude running → normal status color.
+    private var dotColor: Color {
+        switch processManager.attentionFor(task.id) {
+        case .waiting: return .red
+        case .working: return .green
+        case .none: return status.color
+        }
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             Circle()
-                .fill(status.color)
+                .fill(dotColor)
                 .frame(width: 10, height: 10)
 
             VStack(alignment: .leading, spacing: 2) {

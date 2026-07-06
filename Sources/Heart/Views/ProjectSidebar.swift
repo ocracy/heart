@@ -594,7 +594,9 @@ struct ProjectSidebar: View {
                 )
             }
             if task.isClaudeShortcut {
-                ClaudeShortcutRow(task: task, isSelected: selectedTaskId == task.id) {
+                ClaudeShortcutRow(task: task,
+                                  isSelected: selectedTaskId == task.id,
+                                  processManager: processManager) {
                     selectedTaskId = task.id
                 }
             } else if task.isShortcut {
@@ -1056,6 +1058,19 @@ struct ProjectSidebar: View {
                     }
                 }
                 .fixedSize()
+            }
+
+            // Red badge, far right: how many Claude sessions in this folder are
+            // waiting on the user.
+            let waiting = processManager.waitingCount(among: allTasks)
+            if waiting > 0 {
+                Text(verbatim: "\(waiting)")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.red))
+                    .help("\(waiting) Claude session aksiyon bekliyor")
             }
         }
         .padding(.vertical, 4)

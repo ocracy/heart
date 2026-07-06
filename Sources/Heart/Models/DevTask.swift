@@ -104,6 +104,17 @@ struct TaskBundle: Codable {
 /// open sessions intact.
 struct ClaudeSession: Identifiable, Equatable, Hashable {
     let id: String
-    /// User-supplied display name. `nil` falls back to "Terminal {index+1}".
-    var name: String?
+    /// User-supplied display name. `nil` falls back to "Terminal {number}".
+    var name: String? = nil
+    /// Stable terminal number, assigned once at creation from a per-task
+    /// monotonic counter. Never shifts when other sessions are closed, so
+    /// "Terminal 3" stays "Terminal 3" even after "Terminal 2" is removed.
+    var number: Int = 1
+    /// The Claude conversation id (captured from the hook), used to resume this
+    /// exact conversation after the terminal is closed or the machine reboots.
+    var claudeSid: String? = nil
+    /// Live title Claude sets on the terminal (its conversation topic), read from
+    /// the tmux pane title. Shown as the tab label unless the user set a custom
+    /// `name`. Not persisted — re-derived from tmux each second.
+    var autoTitle: String? = nil
 }

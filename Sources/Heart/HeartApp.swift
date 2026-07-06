@@ -101,6 +101,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
+        // Install (idempotently) the Claude Code hooks that report each Heart
+        // terminal's Claude session as working / waiting. Off the main thread —
+        // it touches the filesystem and parses ~/.claude/settings.json.
+        DispatchQueue.global(qos: .utility).async {
+            ClaudeHookInstaller.installIfNeeded()
+        }
+
         // Silent update check ~5s after launch so it doesn't fight the UI
         // for the first frames. UpdateChecker self-throttles to once per
         // 24h, so this is cheap to call every launch.

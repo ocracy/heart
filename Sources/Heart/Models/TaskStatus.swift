@@ -50,3 +50,15 @@ enum TaskStatus: Equatable {
         }
     }
 }
+
+/// Live attention state of a Claude Code session running inside a Heart terminal,
+/// derived from Claude Code hooks (see `ClaudeHookInstaller`). Independent of
+/// `TaskStatus`: a process can be `.running` while Claude is either actively
+/// working (green) or blocked waiting for the user (red).
+enum ClaudeAttention {
+    /// Claude is actively working (prompt submitted / tool loop running).
+    case working
+    /// Claude finished and is waiting for the user — next prompt, a permission
+    /// decision, or an idle nudge.
+    case waiting
+}

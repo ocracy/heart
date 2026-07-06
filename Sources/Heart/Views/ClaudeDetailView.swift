@@ -25,6 +25,9 @@ struct ClaudeDetailView: View {
         .onAppear {
             if processManager.sessions(for: task.id).isEmpty {
                 processManager.addSession(for: task)
+            } else if let active = processManager.activeSession(for: task.id) {
+                // Reconnect a session adopted from a previous Heart run.
+                processManager.ensureAttached(active)
             }
         }
     }
@@ -56,33 +59,74 @@ struct ClaudeDetailView: View {
 
     private func tabBar(sessions: [ClaudeSession], active: String?) -> some View {
         HStack(spacing: 6) {
-            ForEach(Array(sessions.enumerated()), id: \.element.id) { idx, session in
+            ForEach(sessions, id: \.id) { session in
                 sessionPill(session: session,
-                            fallbackLabel: "Terminal \(idx + 1)",
+                            fallbackLabel: "Terminal \(session.number)",
                             isActive: active == session.id)
             }
-            Button {
-                processManager.addSession(for: task)
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 24, height: 24)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.accentColor.opacity(0.12))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.accentColor.opacity(0.4), lineWidth: 0.5)
-                    )
-            }
-            .buttonStyle(.plain)
-            .help("Open another Claude session")
+            addMenu
             Spacer()
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(.ultraThinMaterial)
+    }
+
+    /// "+" now opens a dropdown: a fresh terminal at the top, then every
+    /// previously-closed terminal (by its stable name) so it can be resumed —
+    /// reconnecting to the same Claude conversation.
+    private var addMenu: some View {
+        let closed = processManager.closedTerminals(for: task.id)
+        return Menu {
+            Button {
+                processManager.addSession(for: task)
+            } label: {
+                Label("Yeni terminal", systemImage: "plus")
+            }
+            if !closed.isEmpty {
+                Divider()
+                Section("Kapanmış terminaller") {
+                    ForEach(closed, id: \.number) { c in
+                        Menu {
+                            Button {
+                                processManager.resumeClosedTerminal(c, task: task)
+                            } label: {
+                                Label("Sürdür", systemImage: "arrow.clockwise")
+                            }
+                            Button(role: .destructive) {
+                                processManager.forgetClosedTerminal(c, task: task)
+                            } label: {
+                                Label("Sil", systemImage: "trash")
+                            }
+                        } label: {
+                            Label(closedLabel(c), systemImage: "clock.arrow.circlepath")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 24, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.accentColor.opacity(0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.accentColor.opacity(0.4), lineWidth: 0.5)
+                )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Yeni terminal aç veya kapanmış bir terminali sürdür")
+    }
+
+    private func closedLabel(_ c: ClaudeTerminalStore.Closed) -> String {
+        if let n = c.name, !n.isEmpty { return n }
+        if let t = c.title, !t.isEmpty { return t }
+        return "Terminal \(c.number)"
     }
 
     @ViewBuilder
@@ -91,11 +135,25 @@ struct ClaudeDetailView: View {
                              isActive: Bool) -> some View {
         let status = processManager.status(session.id)
         let isRenaming = renamingSessionId == session.id
-        let displayName = session.name?.isEmpty == false ? session.name! : fallbackLabel
+        // Priority: user's custom name → Claude's own title → "Terminal N".
+        let displayName: String = {
+            if let n = session.name, !n.isEmpty { return n }
+            if let t = session.autoTitle, !t.isEmpty { return t }
+            return fallbackLabel
+        }()
+        // Per-session attention overrides the process-status color so the tab
+        // bar shows exactly *which* terminal is waiting (red) vs working (green).
+        let dotColor: Color = {
+            switch processManager.attention[session.id] {
+            case .waiting: return .red
+            case .working: return .green
+            case .none: return status.color
+            }
+        }()
 
         HStack(spacing: 6) {
             Circle()
-                .fill(status.color)
+                .fill(dotColor)
                 .frame(width: 7, height: 7)
 
             if isRenaming {
