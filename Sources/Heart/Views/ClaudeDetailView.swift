@@ -11,6 +11,7 @@ struct ClaudeDetailView: View {
     @State private var renamingSessionId: String?
     @State private var renameText: String = ""
     @FocusState private var renameFieldFocused: Bool
+    @State private var showCleanup = false
 
     var body: some View {
         let sessions = processManager.sessions(for: task.id)
@@ -21,6 +22,11 @@ struct ClaudeDetailView: View {
             tabBar(sessions: sessions, active: active)
             Divider()
             content(sessions: sessions, active: active)
+        }
+        .sheet(isPresented: $showCleanup) {
+            TerminalCleanupSheet(processManager: processManager,
+                                 isPresented: $showCleanup,
+                                 currentSessionId: processManager.activeSession(for: task.id))
         }
         .onAppear {
             if processManager.sessions(for: task.id).isEmpty {
@@ -104,6 +110,12 @@ struct ClaudeDetailView: View {
                     }
                 }
             }
+            Divider()
+            Button {
+                showCleanup = true
+            } label: {
+                Label("Terminalleri temizle…", systemImage: "trash")
+            }
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 12, weight: .semibold))
@@ -144,7 +156,7 @@ struct ClaudeDetailView: View {
         // Per-session attention overrides the process-status color so the tab
         // bar shows exactly *which* terminal is waiting (red) vs working (green).
         let dotColor: Color = {
-            switch processManager.attention[session.id] {
+            switch processManager.displayState(session.id) {
             case .waiting: return .red
             case .working: return .green
             case .none: return status.color

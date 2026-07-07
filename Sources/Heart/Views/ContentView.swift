@@ -275,9 +275,9 @@ struct ContentView: View {
             processManager.scanForExternalServices(store.tasks)
         }
         .onChange(of: selectedTaskId) { newId in
-            // Tell ProcessManager which terminal the user is looking at, so it
-            // can stay silent when *this* session starts waiting.
-            processManager.focusedTaskId = newId
+            // Tell ProcessManager which terminal the user is looking at — this
+            // also acknowledges (clears) that session's waiting badge.
+            processManager.focusTask(newId)
             guard let newId else { return }
             if store.tasks.contains(where: { $0.id == newId }) {
                 lastValidTaskId = newId

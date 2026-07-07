@@ -35,10 +35,12 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
     /// hook bridge file watcher. UI reads it via `attentionFor`.
     @Published var attention: [String: ClaudeAttention] = [:]
 
-    /// The terminal the user is currently looking at (set by ContentView). Used
-    /// to suppress the sound/notification while the user is already watching the
-    /// session that just started waiting.
+    /// The terminal the user is currently looking at (set by ContentView).
     var focusedTaskId: String?
+    /// Spawn ids whose current waiting the user has already seen — suppressed
+    /// from every red badge/count until Claude enters a new waiting state.
+    @Published private var seenWaiting: Set<String> = []
+    private var didBecomeActiveObserver: Any?
 
     private var stateWatcher: DispatchSourceFileSystemObject?
     private var statePollTimer: Timer?
@@ -53,6 +55,13 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         super.init()
         installKeyMonitor()
         installScrollMonitor()
+        // Coming back to Heart while a waiting session is on screen counts as
+        // seeing it → clear its red badge.
+        didBecomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.markSeenForFocused()
+        }
         startStateWatching()
         // tmux-backed persistence: write our isolated config, then adopt any
         // Claude sessions still alive from a previous Heart run.
@@ -67,6 +76,9 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         }
         if let monitor = scrollMonitor {
             NSEvent.removeMonitor(monitor)
+        }
+        if let obs = didBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(obs)
         }
         stateWatcher?.cancel()
     }
@@ -544,6 +556,48 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         objectWillChange.send()
     }
 
+    /// All live Heart tmux sessions across sockets — for the cleanup panel.
+    func managedSessions() -> [TmuxService.Managed] {
+        TmuxService.allManagedSessions().sorted {
+            ($0.task, $0.number) < ($1.task, $1.number)
+        }
+    }
+
+    /// Kill a session from the cleanup panel: drop the tmux session and, if it's
+    /// an open tab, remove it from the UI too. (Does not remember it as
+    /// resumable — this is an explicit "get rid of it".)
+    func killManaged(_ m: TmuxService.Managed) {
+        TmuxService.kill(m)
+        tmuxBackedIds.remove(m.name)
+        attention[m.name] = nil
+        seenWaiting.remove(m.name)
+        // Also forget its resume entry so it doesn't linger in the "+" dropdown.
+        terminalStore.removeClosed(number: m.number, for: m.task)
+        for (taskId, list) in claudeSessions where list.contains(where: { $0.id == m.name }) {
+            var l = list
+            l.removeAll { $0.id == m.name }
+            claudeSessions[taskId] = l
+            if activeClaudeSession[taskId] == m.name {
+                activeClaudeSession[taskId] = l.last?.id
+            }
+            removeTerminal(taskId: m.name)
+            break
+        }
+        objectWillChange.send()
+        updateDockBadge()
+    }
+
+    /// Size of the "+" dropdown's resume history (remembered closed terminals).
+    func resumeHistoryCount() -> Int {
+        terminalStore.totalClosedCount()
+    }
+
+    /// Wipe the resume history so the "+" dropdown stops listing old terminals.
+    func clearResumeHistory() {
+        terminalStore.clearAllClosed()
+        objectWillChange.send()
+    }
+
     func removeSession(taskId: String, sessionId: String) {
         var list = claudeSessions[taskId] ?? []
         // Remember it so it can be resumed from the "+" dropdown.
@@ -565,6 +619,7 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
     func setActiveSession(taskId: String, sessionId: String) {
         activeClaudeSession[taskId] = sessionId
         ensureAttached(sessionId)
+        markSeen(sessionId)   // focusing this tab acknowledges its waiting
     }
 
     func renameSession(taskId: String, sessionId: String, name: String?) {
@@ -771,8 +826,23 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
     private func reattachTmuxSessions() {
         debugLog("reattach: tmuxPath=\(TmuxService.tmuxPath ?? "nil") available=\(TmuxService.isAvailable)")
         guard TmuxService.isAvailable else { return }
-        let live = TmuxService.listSessions()
-        debugLog("reattach: found \(live.count) live session(s): " +
+
+        // Cold-start race: the tmux server survives Heart quitting, but the very
+        // first `list-sessions` right at launch can transiently come back empty
+        // (or error). If the socket file exists the server should be alive, so
+        // retry briefly before giving up and letting a fresh session be created.
+        var diag = TmuxService.listSessionsDiag()
+        var tries = 0
+        while diag.sessions.isEmpty,
+              FileManager.default.fileExists(atPath: TmuxService.socketPath),
+              tries < 10 {
+            debugLog("reattach retry \(tries): status=\(diag.status) err=[\(diag.err)]")
+            usleep(300_000)   // 0.3s
+            diag = TmuxService.listSessionsDiag()
+            tries += 1
+        }
+        let live = diag.sessions
+        debugLog("reattach: found \(live.count) after \(tries) retr(y/ies), status=\(diag.status) err=[\(diag.err)]: " +
                  live.map { "\($0.name)[task=\($0.task) num=\($0.number)]" }.joined(separator: ", "))
         for s in live {
             tmuxBackedIds.insert(s.name)
@@ -826,7 +896,7 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         ids.append(contentsOf: sessions(for: taskId).map { $0.id })
         var sawWorking = false
         for id in ids {
-            switch attention[id] {
+            switch displayState(id) {
             case .waiting: return .waiting
             case .working: sawWorking = true
             case .none: break
@@ -835,9 +905,52 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         return sawWorking ? .working : nil
     }
 
-    /// Number of `.waiting` Claude sessions among the given tasks (folds shadow
-    /// sessions in via `attentionFor`). Drives the red badges in the sidebar
-    /// folder headers and the project tab pills.
+    /// Attention with *acknowledged* waiting suppressed. Once the user focuses a
+    /// waiting session it's no longer "demanding attention" — every red badge /
+    /// count drops — until Claude enters a NEW waiting state (a fresh Stop),
+    /// which clears the ack and re-alerts. A seen-waiting session reads as
+    /// `.working` so the dot goes green rather than staying red.
+    func displayState(_ spawnId: String) -> ClaudeAttention? {
+        switch attention[spawnId] {
+        case .waiting: return seenWaiting.contains(spawnId) ? .working : .waiting
+        case .working: return .working
+        case .none: return nil
+        }
+    }
+
+    /// Mark a session's current waiting as seen (called when the user focuses it).
+    func markSeen(_ spawnId: String) {
+        if attention[spawnId] == .waiting, !seenWaiting.contains(spawnId) {
+            seenWaiting.insert(spawnId)
+            updateDockBadge()
+        }
+    }
+
+    /// Called by the UI when the user selects a task: remember the focus and
+    /// acknowledge the waiting on its visible terminal.
+    func focusTask(_ taskId: String?) {
+        focusedTaskId = taskId
+        markSeenForFocused()
+    }
+
+    /// Acknowledge the waiting on whatever the user is currently looking at —
+    /// the task itself (regular terminal, spawn id == task id) and/or its active
+    /// Claude session. No-op unless that terminal is actually waiting.
+    private func markSeenForFocused() {
+        guard let t = focusedTaskId else { return }
+        markSeen(t)
+        if let active = activeSession(for: t) { markSeen(active) }
+    }
+
+    private func isFocused(_ spawnId: String) -> Bool {
+        guard let f = focusedTaskId else { return false }
+        if f == spawnId { return true }
+        if let active = activeSession(for: f), active == spawnId { return true }
+        return false
+    }
+
+    /// Number of Claude sessions still demanding attention among the given tasks
+    /// (seen-aware). Drives the red badges in folder headers and project pills.
     func waitingCount(among tasks: [DevTask]) -> Int {
         tasks.reduce(0) { $0 + (attentionFor($1.id) == .waiting ? 1 : 0) }
     }
@@ -914,23 +1027,28 @@ final class ProcessManager: NSObject, ObservableObject, LocalProcessTerminalView
         // Notify (+ bounce the Dock) on transitions *into* waiting.
         for (id, state) in next where state == .waiting && attention[id] != .waiting {
             maybeNotify(spawnId: id, name: meta[id]?.name ?? "", project: meta[id]?.project ?? "")
+            // If the user is already looking at this exact session when it goes
+            // waiting, count it as seen immediately so no red badge lingers.
+            if NSApp.isActive && isFocused(id) { seenWaiting.insert(id) }
         }
         attention = next
+        // Drop acks for sessions that left the waiting state, so the *next*
+        // waiting (a fresh Stop) re-alerts instead of staying silent.
+        seenWaiting = seenWaiting.filter { attention[$0] == .waiting }
         updateDockBadge()
     }
 
-    /// Mirror the total number of waiting Claude sessions onto the Dock icon so
-    /// the user is nagged even when Heart is in the background.
+    /// Mirror the number of *unacknowledged* waiting sessions onto the Dock icon
+    /// so the user is nagged even when Heart is in the background.
     private func updateDockBadge() {
-        let waiting = attention.values.filter { $0 == .waiting }.count
+        let waiting = totalWaiting
         NSApp.dockTile.badgeLabel = waiting > 0 ? "\(waiting)" : nil
-        NSLog("[Heart] attention update: %d waiting, %d tracked", waiting, attention.count)
     }
 
-    /// Total number of Claude sessions currently waiting on the user — drives
-    /// the global Dock badge and the clickable top-bar badge.
+    /// Number of Claude sessions still demanding attention (seen-aware) — drives
+    /// the Dock badge and the clickable top-bar badge.
     var totalWaiting: Int {
-        attention.values.filter { $0 == .waiting }.count
+        attention.keys.filter { displayState($0) == .waiting }.count
     }
 
     /// Fired on every transition *into* waiting. Always alerts — sound + banner

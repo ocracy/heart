@@ -68,6 +68,19 @@ final class ClaudeTerminalStore {
         save()
     }
 
+    /// Total remembered (resumable) terminals across all tasks — the size of the
+    /// "+" dropdown's resume history.
+    func totalClosedCount() -> Int {
+        records.values.reduce(0) { $0 + $1.closed.count }
+    }
+
+    /// Forget the entire resume history (keeps counters so numbering stays
+    /// stable). Wipes what the "+" dropdown lists as resumable.
+    func clearAllClosed() {
+        for key in records.keys { records[key]?.closed.removeAll() }
+        save()
+    }
+
     // MARK: - IO
 
     private func load() {

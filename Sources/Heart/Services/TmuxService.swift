@@ -169,6 +169,45 @@ enum TmuxService {
         _ = run(["set-option", "-t", name, key, value])
     }
 
+    // MARK: - Cleanup (all live Heart sessions, incl. legacy socket)
+
+    /// A live Heart tmux session on some socket — used by the cleanup panel so
+    /// the user can kill leftovers, including orphans on the legacy `-L heart`
+    /// socket that the current build (which uses a fixed `-S` path) no longer
+    /// adopts.
+    struct Managed: Identifiable {
+        let id: String
+        let socketArgs: [String]
+        let name: String
+        let task: String
+        let number: Int
+        let title: String
+        let attached: Bool
+    }
+
+    /// Every Heart session across the current `-S` socket and the legacy
+    /// `-L heart` socket.
+    static func allManagedSessions() -> [Managed] {
+        let sockets = [["-S", socketPath], ["-L", "heart"]]
+        var out: [Managed] = []
+        for sock in sockets {
+            let fmt = "#{session_name}\t#{@heart_task}\t#{@heart_num}\t#{pane_title}\t#{session_attached}"
+            guard let o = runOn(sock, ["list-sessions", "-F", fmt]).out else { continue }
+            for line in o.split(separator: "\n") {
+                let f = line.components(separatedBy: "\t")
+                guard f.count >= 5, !f[1].isEmpty else { continue }
+                out.append(Managed(id: sock.joined() + "|" + f[0], socketArgs: sock,
+                                   name: f[0], task: f[1], number: Int(f[2]) ?? 0,
+                                   title: f[3], attached: f[4] != "0"))
+            }
+        }
+        return out
+    }
+
+    static func kill(_ m: Managed) {
+        _ = runOn(m.socketArgs, ["kill-session", "-t", m.name])
+    }
+
     // MARK: - Private
 
     /// Wrap a value in single quotes for safe embedding in the `zsh -c` string
@@ -178,21 +217,45 @@ enum TmuxService {
     }
 
     @discardableResult
-    private static func run(_ args: [String]) -> (out: String?, status: Int32) {
-        guard let tmux = tmuxPath else { return (nil, -1) }
+    private static func run(_ args: [String]) -> (out: String?, status: Int32, err: String) {
+        runOn(["-S", socketPath], args)
+    }
+
+    @discardableResult
+    private static func runOn(_ socketArgs: [String], _ args: [String]) -> (out: String?, status: Int32, err: String) {
+        guard let tmux = tmuxPath else { return (nil, -1, "no tmux binary") }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: tmux)
-        p.arguments = ["-S", socketPath] + args
+        p.arguments = socketArgs + args
         let out = Pipe()
+        let errPipe = Pipe()
         p.standardOutput = out
-        p.standardError = Pipe()
+        p.standardError = errPipe
         do {
             try p.run()
             p.waitUntilExit()
         } catch {
-            return (nil, -1)
+            return (nil, -1, "\(error)")
         }
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        return (String(data: data, encoding: .utf8), p.terminationStatus)
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let errStr = String(data: errData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (String(data: data, encoding: .utf8), p.terminationStatus, errStr)
+    }
+
+    /// Diagnostic list — returns the parsed sessions plus the raw tmux
+    /// stderr/status so reattach can log *why* it came back empty.
+    static func listSessionsDiag() -> (sessions: [Session], status: Int32, err: String) {
+        let r = run(["list-sessions", "-F",
+                     "#{session_name}\t#{@heart_task}\t#{@heart_num}\t#{@heart_name}\t#{@claude_sid}\t#{session_attached}"])
+        var result: [Session] = []
+        for line in (r.out ?? "").split(separator: "\n") {
+            let f = line.components(separatedBy: "\t")
+            guard f.count >= 6, !f[1].isEmpty else { continue }
+            result.append(Session(name: f[0], task: f[1], number: Int(f[2]) ?? 0,
+                                   displayName: f[3], claudeSid: f[4], attached: f[5] != "0"))
+        }
+        return (result, r.status, r.err)
     }
 }
